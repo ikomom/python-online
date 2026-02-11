@@ -119,7 +119,7 @@ export function EditorX(props: EditorXProps) {
         {toolbarNodes.length > 0 ? (
           <Space size={8}>{toolbarNodes}</Space>
         ) : null}
-        <div style={{ flex: 1 }} />
+        <div className="flex-1" />
         <Space size={8}>
           <Button onClick={onSave} type="primary">
             保存

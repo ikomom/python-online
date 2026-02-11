@@ -3,6 +3,7 @@ import ReactDOM from "react-dom";
 import { loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
 import "./index.css";
+import "./styles/index.scss";
 import App from "./App";
 
 // Configure Monaco to use local package instead of CDN to avoid COEP issues

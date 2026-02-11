@@ -1,4 +1,4 @@
-import React, { memo, useMemo } from "react";
+import { memo, useMemo } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { EditorXMode, EditorXTheme } from "./types";
 
@@ -55,4 +55,3 @@ function EditorSurfaceImpl(props: EditorSurfaceProps) {
 }
 
 export const EditorSurface = memo(EditorSurfaceImpl);
-

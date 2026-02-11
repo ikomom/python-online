@@ -1,19 +1,138 @@
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
-import { Button, Layout, Select, Space, Table, Tag, Typography } from "antd";
-import type { ColumnsType } from "antd/es/table";
+import { Button, Layout, Select, Space, Tag, Tooltip, Typography } from "antd";
+import {
+  LoaderCircle,
+  Play,
+  PlayCircle,
+  SquareStop,
+  StepForward,
+} from "lucide-react";
 import type { editor as MonacoEditor } from "monaco-editor";
+import { Pane, SplitPane } from "react-split-pane";
 import PyodideWorker from "./worker/pyodide.worker?worker";
+import RightPanelStack from "./pages/EditorPage/RightPanelStack";
+import type { CodeTemplate, RunStatus, VariableRow } from "./types";
+import "./App.css";
 
 const IDX_CMD = 0;
 const CMD_RUN = 1;
 const CMD_STEP = 3;
+
+function RunControls(props: {
+  isRunning: boolean;
+  isPaused: boolean;
+  isReady: boolean;
+  hasBreakpoints: boolean;
+  runStatus: RunStatus;
+  onRun: () => void;
+  onContinue: () => void;
+  onStep: () => void;
+  onStop: () => void;
+}) {
+  if (!props.isRunning) {
+    return (
+      <Tooltip
+        title={props.isReady ? "开始运行" : "加载中..."}
+        placement="bottom"
+      >
+        <span>
+          <Button
+            size="small"
+            type="primary"
+            shape="circle"
+            onClick={props.onRun}
+            disabled={!props.isReady}
+            aria-label={props.isReady ? "开始运行" : "加载中"}
+            icon={
+              props.isReady ? (
+                <PlayCircle size={14} />
+              ) : (
+                <LoaderCircle size={14} className="animate-spin" />
+              )
+            }
+          />
+        </span>
+      </Tooltip>
+    );
+  }
+
+  if (
+    !props.hasBreakpoints &&
+    !props.isPaused &&
+    props.runStatus === "running"
+  ) {
+    return (
+      <Space size={4}>
+        <Tooltip title="运行中" placement="bottom">
+          <span>
+            <Button
+              size="small"
+              type="primary"
+              shape="circle"
+              disabled
+              aria-label="运行中"
+              icon={<LoaderCircle size={14} className="animate-spin" />}
+            />
+          </span>
+        </Tooltip>
+        <Tooltip title="结束运行" placement="bottom">
+          <span>
+            <Button
+              size="small"
+              shape="circle"
+              danger
+              onClick={props.onStop}
+              aria-label="结束运行"
+              icon={<SquareStop size={14} />}
+            />
+          </span>
+        </Tooltip>
+      </Space>
+    );
+  }
+
+  return (
+    <Space size={4}>
+      <Tooltip title="继续运行" placement="bottom">
+        <span>
+          <Button
+            size="small"
+            shape="circle"
+            onClick={props.onContinue}
+            disabled={!props.isPaused}
+            aria-label="继续运行"
+            icon={<Play size={14} />}
+          />
+        </span>
+      </Tooltip>
+      <Tooltip title="单步执行" placement="bottom">
+        <span>
+          <Button
+            size="small"
+            shape="circle"
+            onClick={props.onStep}
+            disabled={!props.isPaused}
+            aria-label="单步执行"
+            icon={<StepForward size={14} />}
+          />
+        </span>
+      </Tooltip>
+      <Tooltip title="结束运行" placement="bottom">
+        <span>
+          <Button
+            size="small"
+            shape="circle"
+            danger
+            onClick={props.onStop}
+            aria-label="结束运行"
+            icon={<SquareStop size={14} />}
+          />
+        </span>
+      </Tooltip>
+    </Space>
+  );
+}
 
 const PINNED_VARIABLES = [
   "i",
@@ -29,13 +148,6 @@ const PINNED_VARIABLES = [
   "evens",
   "text",
 ];
-
-type CodeTemplate = {
-  id: string;
-  label: string;
-  description: string;
-  code: string;
-};
 
 const CODE_TEMPLATES: CodeTemplate[] = [
   {
@@ -82,14 +194,14 @@ const CODE_TEMPLATES: CodeTemplate[] = [
   },
 ];
 
-type VariableRow = { key: string; name: string; value: string };
-
 function App() {
   const [code, setCode] = useState<string>(CODE_TEMPLATES[0].code);
   const [output, setOutput] = useState<string[]>([]);
   const [isReady, setIsReady] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  const [runStatus, setRunStatus] = useState<RunStatus>("idle");
+  const [outputDurationMs, setOutputDurationMs] = useState<number | null>(null);
   const [currentLine, setCurrentLine] = useState<number | null>(null);
   const [hoverLine, setHoverLine] = useState<number | null>(null);
   const [variables, setVariables] = useState<Record<string, string>>({});
@@ -102,12 +214,22 @@ function App() {
   const sabRef = useRef<Int32Array | null>(null);
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const decorationsRef = useRef<string[]>([]);
+  const runIdRef = useRef(0);
+  const minEndAtRef = useRef(0);
+  const finishTimerRef = useRef<number | null>(null);
+  const hadErrorRef = useRef(false);
+  const runStartedAtRef = useRef<number | null>(null);
 
-  useEffect(() => {
+  const clearFinishTimer = useCallback(() => {
+    if (finishTimerRef.current === null) return;
+    window.clearTimeout(finishTimerRef.current);
+    finishTimerRef.current = null;
+  }, []);
+
+  const initWorker = useCallback((): Worker => {
     const worker = new PyodideWorker();
     workerRef.current = worker;
 
-    // Create SharedArrayBuffer
     const sab = new SharedArrayBuffer(1024);
     const int32 = new Int32Array(sab);
     sabRef.current = int32;
@@ -126,21 +248,50 @@ function App() {
         setCurrentLine(lineno);
         setVariables(vars);
       } else if (type === "DONE") {
-        setIsRunning(false);
-        setIsPaused(false);
-        setCurrentLine(null);
-        setOutput((prev) => [...prev, "—— 执行结束 ——"]);
+        const runId = runIdRef.current;
+        const now = performance.now();
+        const delayMs = Math.max(0, minEndAtRef.current - now);
+        const hadError = hadErrorRef.current;
+        const startedAt = runStartedAtRef.current;
+        const durationMs =
+          !hadError && startedAt !== null
+            ? Math.max(0, Math.round(now - startedAt))
+            : null;
+
+        const finalize = () => {
+          if (runIdRef.current !== runId) return;
+          setIsRunning(false);
+          setIsPaused(false);
+          setCurrentLine(null);
+          setRunStatus(hadError ? "error" : "success");
+          if (!hadError) setOutputDurationMs(durationMs);
+          setOutput((prev) => [
+            ...prev,
+            hadError ? "—— 执行失败 ——" : "—— 执行成功 ——",
+          ]);
+        };
+
+        if (delayMs > 0) {
+          clearFinishTimer();
+          finishTimerRef.current = window.setTimeout(finalize, delayMs);
+        } else {
+          finalize();
+        }
       } else if (type === "ERROR") {
         setOutput((prev) => [...prev, `错误：${message}`]);
-        setIsRunning(false);
-        setIsPaused(false);
+        hadErrorRef.current = true;
       }
     };
 
+    return worker;
+  }, [clearFinishTimer]);
+
+  useEffect(() => {
+    initWorker();
     return () => {
-      worker.terminate();
+      workerRef.current?.terminate();
     };
-  }, []);
+  }, [initWorker]);
 
   // Sync breakpoints with worker
   useEffect(() => {
@@ -253,9 +404,17 @@ function App() {
   );
 
   const runCode = useCallback(() => {
+    runIdRef.current += 1;
+    clearFinishTimer();
+    hadErrorRef.current = false;
+    runStartedAtRef.current = performance.now();
+    minEndAtRef.current =
+      performance.now() + (breakpoints.length === 0 ? 100 : 0);
     setOutput([]);
     setIsRunning(true);
     setIsPaused(false);
+    setRunStatus("running");
+    setOutputDurationMs(null);
     setCurrentLine(null);
     setVariables({});
 
@@ -263,21 +422,51 @@ function App() {
       type: "RUN_CODE",
       payload: { code, breakpoints },
     });
-  }, [breakpoints, code]);
+  }, [breakpoints, clearFinishTimer, code]);
 
   const step = useCallback(() => {
     if (!sabRef.current) return;
+    workerRef.current?.postMessage({
+      type: "UPDATE_BREAKPOINTS",
+      payload: breakpoints,
+    });
     Atomics.store(sabRef.current, IDX_CMD, CMD_STEP);
     Atomics.notify(sabRef.current, IDX_CMD);
     setIsPaused(false);
-  }, []);
+  }, [breakpoints]);
 
   const continueExec = useCallback(() => {
     if (!sabRef.current) return;
+    workerRef.current?.postMessage({
+      type: "UPDATE_BREAKPOINTS",
+      payload: breakpoints,
+    });
     Atomics.store(sabRef.current, IDX_CMD, CMD_RUN);
     Atomics.notify(sabRef.current, IDX_CMD);
     setIsPaused(false);
-  }, []);
+  }, [breakpoints]);
+
+  const stopExec = useCallback(() => {
+    runIdRef.current += 1;
+    clearFinishTimer();
+    workerRef.current?.terminate();
+    workerRef.current = null;
+    sabRef.current = null;
+    setIsRunning(false);
+    setIsPaused(false);
+    setRunStatus("idle");
+    setOutputDurationMs(null);
+    setCurrentLine(null);
+    setHoverLine(null);
+    setVariables({});
+    setIsReady(false);
+    setOutput((prev) => [...prev, "—— 已终止 ——"]);
+    const worker = initWorker();
+    worker.postMessage({
+      type: "UPDATE_BREAKPOINTS",
+      payload: breakpoints,
+    });
+  }, [breakpoints, clearFinishTimer, initWorker]);
 
   const selectedTemplate =
     CODE_TEMPLATES.find((template) => template.id === selectedTemplateId) ??
@@ -353,126 +542,97 @@ function App() {
     }));
   }, [priorityOrder, variables]);
 
-  const variableColumns = useMemo<ColumnsType<VariableRow>>(
-    () => [
-      { title: "变量", dataIndex: "name", width: 160 },
-      { title: "值", dataIndex: "value" },
-    ],
-    [],
-  );
-
   return (
-    <Layout style={{ height: "100%" }}>
-      <Layout.Header style={{ background: "transparent", padding: "8px 12px" }}>
-        <Space wrap size={8}>
-          <Typography.Text strong>Python 调试器</Typography.Text>
-          <Tag>{status}</Tag>
+    <Layout className="flex flex-col h-full">
+      <Layout.Header className="flex items-center px-2 h-12! bg-transparent!">
+        <Space size={6} align="center" className="min-w-0">
+          <Typography.Text strong className="text-[13px]">
+            Python 调试器
+          </Typography.Text>
+          <Tag className="ml-1 text-xs w-14 text-center!">{status}</Tag>
           <Select
             value={selectedTemplateId}
-            style={{ width: 160 }}
+            size="small"
+            className="min-w-0"
+            popupMatchSelectWidth={false}
+            disabled={isRunning}
             options={CODE_TEMPLATES.map((t) => ({
               value: t.id,
-              label: t.label,
+              label: `${t.label}`,
+              rawLabel: t.label,
+              description: t.description,
             }))}
+            optionRender={(option) => (
+              <div className="flex flex-col w-full max-w-full">
+                <div className="text-[13px] leading-5 break-words whitespace-normal">
+                  {String(option.data.rawLabel ?? option.label)}
+                </div>
+                <div className="text-xs text-black/45 leading-4 break-words whitespace-normal">
+                  {String(option.data.description ?? "")}
+                </div>
+              </div>
+            )}
             onChange={handleTemplateChange}
           />
-          <Button onClick={applyTemplate}>加载模板</Button>
-          <Typography.Text type="secondary">
-            {selectedTemplate.description}
-          </Typography.Text>
-          {!isRunning ? (
-            <Button type="primary" onClick={runCode} disabled={!isReady}>
-              {isReady ? "开始运行" : "加载中..."}
-            </Button>
-          ) : (
-            <>
-              <Button onClick={continueExec} disabled={!isPaused}>
-                继续运行
-              </Button>
-              <Button onClick={step} disabled={!isPaused}>
-                单步执行
-              </Button>
-            </>
-          )}
+          <Button size="small" onClick={applyTemplate} disabled={isRunning}>
+            加载模板
+          </Button>
         </Space>
+        <div className="flex-1" />
+        <div className="flex items-center justify-end shrink-0 min-w-[120px]">
+          <RunControls
+            isRunning={isRunning}
+            isPaused={isPaused}
+            isReady={isReady}
+            hasBreakpoints={breakpoints.length > 0}
+            runStatus={runStatus}
+            onRun={runCode}
+            onContinue={continueExec}
+            onStep={step}
+            onStop={stopExec}
+          />
+        </div>
       </Layout.Header>
 
-      <Layout>
-        <Layout.Content style={{ minWidth: 0 }}>
-          <Editor
-            height="100%"
-            defaultLanguage="python"
-            theme="vs"
-            value={code}
-            onChange={(val) => setCode(val || "")}
-            onMount={handleEditorMount}
-            options={{
-              minimap: { enabled: false },
-              glyphMargin: true,
-              lineNumbers: "on",
-              scrollBeyondLastLine: false,
-              renderLineHighlight: "line",
-            }}
-          />
-        </Layout.Content>
-
-        <Layout.Sider
-          width={420}
-          style={{
-            background: "transparent",
-            borderLeft: "1px solid rgba(0,0,0,0.15)",
-            padding: 12,
-          }}
+      <div className="flex-1 min-h-0">
+        <SplitPane
+          direction="horizontal"
+          dividerClassName="thick"
+          className="h-full"
         >
-          <Space direction="vertical" size={12} style={{ width: "100%" }}>
-            <div style={{ border: "1px solid rgba(0,0,0,0.15)" }}>
-              <div
-                style={{
-                  padding: "8px 10px",
-                  borderBottom: "1px solid rgba(0,0,0,0.15)",
+          <Pane minSize={520} defaultSize="68%" className="min-h-0">
+            <div className="h-full">
+              <Editor
+                height="100%"
+                defaultLanguage="python"
+                theme="vs"
+                value={code}
+                onChange={(val) => setCode(val || "")}
+                onMount={handleEditorMount}
+                options={{
+                  minimap: { enabled: false },
+                  glyphMargin: true,
+                  lineNumbers: "on",
+                  scrollBeyondLastLine: false,
+                  renderLineHighlight: "line",
                 }}
-              >
-                <Typography.Text strong>变量</Typography.Text>
-              </div>
-              <div style={{ maxHeight: "40vh", overflow: "auto" }}>
-                <Table
-                  size="small"
-                  pagination={false}
-                  columns={variableColumns}
-                  dataSource={variableRows}
-                />
-              </div>
+              />
             </div>
-
-            <div style={{ border: "1px solid rgba(0,0,0,0.15)" }}>
-              <div
-                style={{
-                  padding: "8px 10px",
-                  borderBottom: "1px solid rgba(0,0,0,0.15)",
-                }}
-              >
-                <Typography.Text strong>输出</Typography.Text>
-              </div>
-              <div style={{ padding: 10, maxHeight: "40vh", overflow: "auto" }}>
-                {output.length === 0 ? (
-                  <Typography.Text type="secondary">
-                    等待输出...
-                  </Typography.Text>
-                ) : (
-                  output.map((line, idx) => (
-                    <Typography.Paragraph
-                      key={idx}
-                      style={{ marginBottom: 6, whiteSpace: "pre-wrap" }}
-                    >
-                      {line}
-                    </Typography.Paragraph>
-                  ))
-                )}
-              </div>
+          </Pane>
+          <Pane minSize={280} className="min-h-0">
+            <div className="h-full">
+              <RightPanelStack
+                breakpoints={breakpoints}
+                onToggleBreakpoint={toggleBreakpoint}
+                variableRows={variableRows}
+                output={output}
+                outputStatus={runStatus}
+                outputDurationMs={outputDurationMs}
+              />
             </div>
-          </Space>
-        </Layout.Sider>
-      </Layout>
+          </Pane>
+        </SplitPane>
+      </div>
     </Layout>
   );
 }
