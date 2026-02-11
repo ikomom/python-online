@@ -1,0 +1,28 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: ds-var("color-surface");
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: ds-var("layout-gap");
+  height: 44px;
+  padding: 0 ds-var("layout-gap-lg");
+  background: ds-var("color-surface-elevated");
+  border-bottom: 1px solid ds-var("color-border");
+  box-shadow: ds-var("shadow-sm");
+}
+
+.title {
+  font-family: ds-var("font-family-mono");
+  font-size: ds-var("font-size-sm");
+  color: ds-var("color-text-secondary");
+}
+
+.surface {
+  flex: 1;
+  min-height: 0;
+}

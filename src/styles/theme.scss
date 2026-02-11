@@ -1,0 +1,71 @@
+@forward "./tokens";
+
+@use "sass:math";
+@use "./tokens" as t;
+
+@mixin ds-export-mode($mode) {
+  @if $mode == light {
+    @include t.ds-export-vars(t.$ds-tokens-light);
+  } @else {
+    @include t.ds-export-vars(t.$ds-tokens-dark);
+  }
+}
+
+@mixin ds-apply-themes() {
+  body[data-theme="light"] {
+    @include ds-export-mode(light);
+    color-scheme: light;
+  }
+
+  body[data-theme="dark"] {
+    @include ds-export-mode(dark);
+    color-scheme: dark;
+  }
+}
+
+@mixin ds-global-base() {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    overflow: hidden;
+    background: t.ds-var("color-bg");
+    color: t.ds-var("color-text");
+    font-family: t.ds-var("font-family");
+    font-size: t.ds-var("font-size-base");
+    line-height: t.ds-var("line-height-base");
+  }
+
+  ::selection {
+    background: t.ds-var("color-focus");
+    color: t.ds-var("color-text");
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+    background: t.ds-var("color-surface");
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: t.ds-var("color-border-strong");
+    border-radius: t.ds-var("radius-base");
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: t.ds-var("color-primary");
+  }
+}
+
+@mixin ds-grid-background() {
+  .ds-bg-grid {
+    background-size: 40px 40px;
+    background-image:
+      linear-gradient(to right, t.ds-var("grid-line") 1px, transparent 1px),
+      linear-gradient(to bottom, t.ds-var("grid-line") 1px, transparent 1px);
+  }
+}
