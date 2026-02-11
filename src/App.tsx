@@ -12,7 +12,7 @@ import type { editor as MonacoEditor } from "monaco-editor";
 import { Pane, SplitPane } from "react-split-pane";
 import PyodideWorker from "./worker/pyodide.worker?worker";
 import RightPanelStack from "./pages/EditorPage/RightPanelStack";
-import type { CodeTemplate, RunStatus, VariableRow } from "./types";
+import type { CodeTemplate } from "./types";
 import { usePythonStore } from "./store/usePythonStore";
 import "./App.css";
 
@@ -21,32 +21,33 @@ const CMD_RUN = 1;
 const CMD_STEP = 3;
 
 function RunControls(props: {
-  isRunning: boolean;
-  isPaused: boolean;
-  isReady: boolean;
-  hasBreakpoints: boolean;
-  runStatus: RunStatus;
   onRun: () => void;
   onContinue: () => void;
   onStep: () => void;
   onStop: () => void;
 }) {
-  if (!props.isRunning) {
+  const { isRunning, isPaused, isReady, hasBreakpoints, runStatus } =
+    usePythonStore((s) => ({
+      isRunning: s.isRunning,
+      isPaused: s.isPaused,
+      isReady: s.isReady,
+      hasBreakpoints: s.breakpoints.length > 0,
+      runStatus: s.runStatus,
+    }));
+
+  if (!isRunning) {
     return (
-      <Tooltip
-        title={props.isReady ? "开始运行" : "加载中..."}
-        placement="bottom"
-      >
+      <Tooltip title={isReady ? "开始运行" : "加载中..."} placement="bottom">
         <span>
           <Button
             size="small"
             type="primary"
             shape="circle"
             onClick={props.onRun}
-            disabled={!props.isReady}
-            aria-label={props.isReady ? "开始运行" : "加载中"}
+            disabled={!isReady}
+            aria-label={isReady ? "开始运行" : "加载中"}
             icon={
-              props.isReady ? (
+              isReady ? (
                 <PlayCircle size={14} />
               ) : (
                 <LoaderCircle size={14} className="animate-spin" />
@@ -58,11 +59,7 @@ function RunControls(props: {
     );
   }
 
-  if (
-    !props.hasBreakpoints &&
-    !props.isPaused &&
-    props.runStatus === "running"
-  ) {
+  if (!hasBreakpoints && !isPaused && runStatus === "running") {
     return (
       <Space size={4}>
         <Tooltip title="运行中" placement="bottom">
@@ -101,7 +98,7 @@ function RunControls(props: {
             size="small"
             shape="circle"
             onClick={props.onContinue}
-            disabled={!props.isPaused}
+            disabled={!isPaused}
             aria-label="继续运行"
             icon={<Play size={14} />}
           />
@@ -113,7 +110,7 @@ function RunControls(props: {
             size="small"
             shape="circle"
             onClick={props.onStep}
-            disabled={!props.isPaused}
+            disabled={!isPaused}
             aria-label="单步执行"
             icon={<StepForward size={14} />}
           />
@@ -134,21 +131,6 @@ function RunControls(props: {
     </Space>
   );
 }
-
-const PINNED_VARIABLES = [
-  "i",
-  "x",
-  "y",
-  "total",
-  "avg",
-  "counter",
-  "score",
-  "level",
-  "numbers",
-  "squares",
-  "evens",
-  "text",
-];
 
 const CODE_TEMPLATES: CodeTemplate[] = [
   {
@@ -203,12 +185,8 @@ function App() {
     isReady,
     isRunning,
     isPaused,
-    runStatus,
     currentLine,
     hoverLine,
-    output,
-    variables,
-    outputDurationMs,
     setCode,
     setSelectedTemplateId,
     toggleBreakpoint,
@@ -219,7 +197,7 @@ function App() {
     setCurrentLine,
     setHoverLine,
     setOutput,
-    setVariables,
+    setVariableScopes,
     setOutputDurationMs,
     resetExecution,
   } = usePythonStore();
@@ -258,7 +236,7 @@ function App() {
     worker.postMessage({ type: "INIT_SAB", payload: sab });
 
     worker.onmessage = (event: MessageEvent) => {
-      const { type, message, lineno, variables: vars } = event.data;
+      const { type, message, lineno, scopes } = event.data;
 
       if (type === "READY") {
         setIsReady(true);
@@ -267,7 +245,7 @@ function App() {
       } else if (type === "PAUSED") {
         setIsPaused(true);
         setCurrentLine(lineno);
-        setVariables(vars || {});
+        setVariableScopes(Array.isArray(scopes) ? scopes : []);
       } else if (type === "DONE") {
         const runId = runIdRef.current;
         const now = performance.now();
@@ -314,7 +292,7 @@ function App() {
     setOutput,
     setOutputDurationMs,
     setRunStatus,
-    setVariables,
+    setVariableScopes,
   ]);
 
   useEffect(() => {
@@ -439,7 +417,7 @@ function App() {
     setRunStatus("running");
     setOutputDurationMs(null);
     setCurrentLine(null);
-    setVariables({});
+    setVariableScopes([]);
 
     workerRef.current?.postMessage({
       type: "RUN_CODE",
@@ -455,7 +433,7 @@ function App() {
     setOutput,
     setOutputDurationMs,
     setRunStatus,
-    setVariables,
+    setVariableScopes,
   ]);
 
   const step = useCallback(() => {
@@ -509,7 +487,7 @@ function App() {
 
   const applyTemplate = useCallback(() => {
     setCode(selectedTemplate.code);
-    setVariables({});
+    setVariableScopes([]);
     setCurrentLine(null);
     setIsPaused(false);
   }, [
@@ -517,17 +495,17 @@ function App() {
     setCode,
     setCurrentLine,
     setIsPaused,
-    setVariables,
+    setVariableScopes,
   ]);
 
   const handleTemplateChange = useCallback(
     (id: string) => {
       setSelectedTemplateId(id);
-      setVariables({});
+      setVariableScopes([]);
       setCurrentLine(null);
       setIsPaused(false);
     },
-    [setCurrentLine, setIsPaused, setSelectedTemplateId, setVariables],
+    [setCurrentLine, setIsPaused, setSelectedTemplateId, setVariableScopes],
   );
 
   const status = useMemo(() => {
@@ -536,55 +514,6 @@ function App() {
     if (isRunning) return "运行中";
     return "就绪";
   }, [isPaused, isReady, isRunning]);
-
-  const templateVariables = useMemo(() => {
-    const names: string[] = [];
-    const add = (name: string) => {
-      if (!names.includes(name)) names.push(name);
-    };
-
-    const lines = selectedTemplate.code.split("\n");
-    for (const line of lines) {
-      const assignMatch = line.match(/^\s*([A-Za-z_]\w*)\s*=/);
-      if (assignMatch) add(assignMatch[1]);
-      const forMatch = line.match(/^\s*for\s+([A-Za-z_]\w*)\s+in\s+/);
-      if (forMatch) add(forMatch[1]);
-      const defMatch = line.match(/^\s*def\s+([A-Za-z_]\w*)\s*\(/);
-      if (defMatch) add(defMatch[1]);
-      const classMatch = line.match(/^\s*class\s+([A-Za-z_]\w*)\s*[:(]/);
-      if (classMatch) add(classMatch[1]);
-    }
-
-    return names;
-  }, [selectedTemplate.code]);
-
-  const priorityOrder = useMemo(() => {
-    const order: string[] = [];
-    for (const name of templateVariables) {
-      if (!order.includes(name)) order.push(name);
-    }
-    for (const name of PINNED_VARIABLES) {
-      if (!order.includes(name)) order.push(name);
-    }
-    return order;
-  }, [templateVariables]);
-
-  const variableRows = useMemo<VariableRow[]>(() => {
-    const priorityIndex = new Map<string, number>(
-      priorityOrder.map((name, index) => [name, index]),
-    );
-    const sorted = Object.entries(variables).sort(([a], [b]) => {
-      const pa = priorityIndex.get(a) ?? Number.POSITIVE_INFINITY;
-      const pb = priorityIndex.get(b) ?? Number.POSITIVE_INFINITY;
-      if (pa !== pb) return pa - pb;
-      return a.localeCompare(b);
-    });
-    return sorted.map(([name, value]) => ({
-      key: name,
-      name,
-      value,
-    }));
-  }, [priorityOrder, variables]);
 
   return (
     <Layout className="flex flex-col h-full">
@@ -625,11 +554,6 @@ function App() {
         <div className="flex-1" />
         <div className="flex items-center justify-end shrink-0 min-w-[120px]">
           <RunControls
-            isRunning={isRunning}
-            isPaused={isPaused}
-            isReady={isReady}
-            hasBreakpoints={breakpoints.length > 0}
-            runStatus={runStatus}
             onRun={runCode}
             onContinue={continueExec}
             onStep={step}
@@ -665,14 +589,7 @@ function App() {
           </Pane>
           <Pane minSize={280} className="min-h-0">
             <div className="h-full">
-              <RightPanelStack
-                breakpoints={breakpoints}
-                onToggleBreakpoint={toggleBreakpoint}
-                variableRows={variableRows}
-                output={output}
-                outputStatus={runStatus}
-                outputDurationMs={outputDurationMs}
-              />
+              <RightPanelStack />
             </div>
           </Pane>
         </SplitPane>

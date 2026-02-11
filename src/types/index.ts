@@ -6,6 +6,13 @@ export type VariableRow = {
   value: string;
 };
 
+export type VariableScope = {
+  id: string;
+  name: string;
+  lineno: number;
+  variables: Record<string, string>;
+};
+
 export type CodeTemplate = {
   id: string;
   label: string;

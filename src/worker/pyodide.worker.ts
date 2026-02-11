@@ -20,7 +20,7 @@ type WorkerCtx = {
 
 type WorkerGlobal = WorkerCtx & {
   should_pause?: (lineno: number) => boolean;
-  on_break?: (lineno: number, locals: unknown) => void;
+  on_break?: (lineno: number, frames: unknown) => void;
   wait_for_command?: () => void;
 };
 
@@ -63,11 +63,37 @@ const TRACER_CODE = `
 import sys
 import js
 
+def safe_repr(value):
+    try:
+        return repr(value)
+    except Exception:
+        try:
+            return str(value)
+        except Exception:
+            return "<unprintable>"
+
+def collect_frames(frame, max_depth=20):
+    frames = []
+    depth = 0
+    f = frame
+    while f is not None and depth < max_depth:
+        locals_dict = {}
+        for k, v in f.f_locals.items():
+            locals_dict[str(k)] = safe_repr(v)
+        frames.append({
+            "name": str(f.f_code.co_name),
+            "lineno": int(f.f_lineno),
+            "locals": locals_dict
+        })
+        f = f.f_back
+        depth += 1
+    return frames
+
 def tracer(frame, event, arg):
     if event == 'line':
         lineno = frame.f_lineno
         if js.should_pause(lineno):
-            js.on_break(lineno, frame.f_locals)
+            js.on_break(lineno, collect_frames(frame))
             js.wait_for_command()
     return tracer
 
@@ -96,27 +122,43 @@ workerGlobal.should_pause = (lineno: number) => {
 };
 
 workerGlobal.on_break = (lineno: number, locals: unknown) => {
-  let variables: Record<string, string> = {};
+  let variableScopes: { name: string; lineno: number; locals: unknown }[] = [];
   try {
-    const localsMap =
+    const framesList =
       typeof locals === "object" && locals !== null && "toJs" in locals
         ? (locals as { toJs: () => unknown }).toJs()
         : null;
-    // Handle Map or Object
-    if (localsMap instanceof Map) {
-      localsMap.forEach((value, key) => {
-        variables[String(key)] = String(value);
-      });
-    } else if (typeof localsMap === "object" && localsMap !== null) {
-      // Fallback if it's an object
-      for (const key in localsMap as Record<string, unknown>) {
-        variables[key] = String((localsMap as Record<string, unknown>)[key]);
-      }
+    if (Array.isArray(framesList)) {
+      variableScopes = framesList as { name: string; lineno: number; locals: unknown }[];
+    } else if (framesList) {
+      variableScopes = [
+        framesList as { name: string; lineno: number; locals: unknown },
+      ];
     }
   } catch {
-    variables = { error: "无法解析变量" };
+    variableScopes = [
+      { name: "<error>", lineno, locals: { error: "无法解析变量" } },
+    ];
   }
-  ctx.postMessage({ type: "PAUSED", lineno, variables });
+  const scopes = variableScopes.map((frame, index) => {
+    const variables: Record<string, string> = {};
+    const localsObject = frame.locals;
+    if (localsObject && typeof localsObject === "object") {
+      for (const [key, value] of Object.entries(
+        localsObject as Record<string, unknown>,
+      )) {
+        variables[key] = String(value);
+      }
+    }
+    return {
+      id: `${index}:${frame.name}:${frame.lineno}`,
+      name: frame.name,
+      lineno: frame.lineno,
+      variables,
+    };
+  });
+
+  ctx.postMessage({ type: "PAUSED", lineno, scopes });
 };
 
 workerGlobal.wait_for_command = () => {

@@ -1,13 +1,11 @@
 import React from "react";
 import ReactDOM from "react-dom";
-import { loader } from "@monaco-editor/react";
-import * as monaco from "monaco-editor";
 import "./index.css";
 import "./styles/index.scss";
 import App from "./App";
+import { setupMonaco } from "./monaco/setupMonaco";
 
-// Configure Monaco to use local package instead of CDN to avoid COEP issues
-loader.config({ monaco });
+setupMonaco();
 
 ReactDOM.render(
   <React.StrictMode>

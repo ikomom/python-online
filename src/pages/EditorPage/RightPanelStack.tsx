@@ -12,16 +12,8 @@ import CollapsiblePanel from "../../components/CollapsiblePanel";
 import BreakpointPanel from "./BreakpointPanel";
 import OutputPanel from "./OutputPanel";
 import VariablePanel from "./VariablePanel";
-import type { RunStatus, VariableRow } from "../../types";
-
-export type RightPanelStackProps = {
-  breakpoints: number[];
-  onToggleBreakpoint: (line: number) => void;
-  variableRows: VariableRow[];
-  output: string[];
-  outputStatus: RunStatus;
-  outputDurationMs: number | null;
-};
+import type { RunStatus, VariableScope } from "../../types";
+import { usePythonStore } from "../../store/usePythonStore";
 
 type PanelKey = "breakpoints" | "variables" | "output";
 
@@ -35,10 +27,8 @@ type PanelDef = {
   render: (ctx: {
     breakpoints: number[];
     onToggleBreakpoint: (line: number) => void;
-    variableRows: VariableRow[];
+    variableScopes: VariableScope[];
     output: string[];
-    outputStatus: RunStatus;
-    outputDurationMs: number | null;
   }) => React.ReactNode;
 };
 
@@ -48,7 +38,7 @@ const PANEL_DEFS: PanelDef[] = [
     title: "变量",
     minOpenPx: 140,
     defaultOpenSize: "47%",
-    render: (ctx) => <VariablePanel rows={ctx.variableRows} />,
+    render: (ctx) => <VariablePanel scopes={ctx.variableScopes} />,
   },
   {
     key: "breakpoints",
@@ -179,7 +169,23 @@ function PanelDivider(props: DividerProps & { isEnabled: boolean }) {
   );
 }
 
-export default function RightPanelStack(props: RightPanelStackProps) {
+export default function RightPanelStack() {
+  const {
+    breakpoints,
+    toggleBreakpoint,
+    output,
+    runStatus,
+    outputDurationMs,
+    variableScopes,
+  } = usePythonStore((s) => ({
+    breakpoints: s.breakpoints,
+    toggleBreakpoint: s.toggleBreakpoint,
+    output: s.output,
+    runStatus: s.runStatus,
+    outputDurationMs: s.outputDurationMs,
+    variableScopes: s.variableScopes,
+  }));
+
   const panelDefs = useMemo(() => PANEL_DEFS, []);
   const [openByKey, setOpenByKey] = useState<Record<PanelKey, boolean>>(() => {
     const next = {} as Record<PanelKey, boolean>;
@@ -284,8 +290,8 @@ export default function RightPanelStack(props: RightPanelStackProps) {
                 title={
                   panel.key === "output" ? (
                     <OutputPanelTitle
-                      status={props.outputStatus}
-                      durationMs={props.outputDurationMs}
+                      status={runStatus}
+                      durationMs={outputDurationMs}
                     />
                   ) : (
                     panel.title
@@ -295,12 +301,10 @@ export default function RightPanelStack(props: RightPanelStackProps) {
                 onToggle={(nextOpen) => onTogglePanel(panel.key, nextOpen)}
               >
                 {panel.render({
-                  breakpoints: props.breakpoints,
-                  onToggleBreakpoint: props.onToggleBreakpoint,
-                  variableRows: props.variableRows,
-                  output: props.output,
-                  outputStatus: props.outputStatus,
-                  outputDurationMs: props.outputDurationMs,
+                  breakpoints,
+                  onToggleBreakpoint: toggleBreakpoint,
+                  variableScopes,
+                  output,
                 })}
               </CollapsiblePanel>
             </div>
