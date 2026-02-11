@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { Button, Layout, Select, Space, Tag, Tooltip, Typography } from "antd";
 import {
@@ -13,6 +13,7 @@ import { Pane, SplitPane } from "react-split-pane";
 import PyodideWorker from "./worker/pyodide.worker?worker";
 import RightPanelStack from "./pages/EditorPage/RightPanelStack";
 import type { CodeTemplate, RunStatus, VariableRow } from "./types";
+import { usePythonStore } from "./store/usePythonStore";
 import "./App.css";
 
 const IDX_CMD = 0;
@@ -195,20 +196,33 @@ const CODE_TEMPLATES: CodeTemplate[] = [
 ];
 
 function App() {
-  const [code, setCode] = useState<string>(CODE_TEMPLATES[0].code);
-  const [output, setOutput] = useState<string[]>([]);
-  const [isReady, setIsReady] = useState(false);
-  const [isRunning, setIsRunning] = useState(false);
-  const [isPaused, setIsPaused] = useState(false);
-  const [runStatus, setRunStatus] = useState<RunStatus>("idle");
-  const [outputDurationMs, setOutputDurationMs] = useState<number | null>(null);
-  const [currentLine, setCurrentLine] = useState<number | null>(null);
-  const [hoverLine, setHoverLine] = useState<number | null>(null);
-  const [variables, setVariables] = useState<Record<string, string>>({});
-  const [breakpoints, setBreakpoints] = useState<number[]>([]);
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(
-    CODE_TEMPLATES[0].id,
-  );
+  const {
+    code,
+    selectedTemplateId,
+    breakpoints,
+    isReady,
+    isRunning,
+    isPaused,
+    runStatus,
+    currentLine,
+    hoverLine,
+    output,
+    variables,
+    outputDurationMs,
+    setCode,
+    setSelectedTemplateId,
+    toggleBreakpoint,
+    setIsReady,
+    setIsRunning,
+    setIsPaused,
+    setRunStatus,
+    setCurrentLine,
+    setHoverLine,
+    setOutput,
+    setVariables,
+    setOutputDurationMs,
+    resetExecution,
+  } = usePythonStore();
 
   const workerRef = useRef<Worker | null>(null);
   const sabRef = useRef<Int32Array | null>(null);
@@ -219,6 +233,13 @@ function App() {
   const finishTimerRef = useRef<number | null>(null);
   const hadErrorRef = useRef(false);
   const runStartedAtRef = useRef<number | null>(null);
+
+  // Initialize code from default template on first load
+  useEffect(() => {
+    if (!code) {
+      setCode(CODE_TEMPLATES[0].code);
+    }
+  }, [code, setCode]);
 
   const clearFinishTimer = useCallback(() => {
     if (finishTimerRef.current === null) return;
@@ -246,7 +267,7 @@ function App() {
       } else if (type === "PAUSED") {
         setIsPaused(true);
         setCurrentLine(lineno);
-        setVariables(vars);
+        setVariables(vars || {});
       } else if (type === "DONE") {
         const runId = runIdRef.current;
         const now = performance.now();
@@ -284,7 +305,17 @@ function App() {
     };
 
     return worker;
-  }, [clearFinishTimer]);
+  }, [
+    clearFinishTimer,
+    setCurrentLine,
+    setIsPaused,
+    setIsReady,
+    setIsRunning,
+    setOutput,
+    setOutputDurationMs,
+    setRunStatus,
+    setVariables,
+  ]);
 
   useEffect(() => {
     initWorker();
@@ -361,14 +392,6 @@ function App() {
     );
   }, [breakpoints, currentLine, hoverLine]);
 
-  const toggleBreakpoint = useCallback((line: number) => {
-    setBreakpoints((prev) => {
-      return prev.includes(line)
-        ? prev.filter((l) => l !== line)
-        : [...prev, line];
-    });
-  }, []);
-
   const handleEditorMount = useCallback<OnMount>(
     (editor, monaco) => {
       editorRef.current = editor;
@@ -400,7 +423,7 @@ function App() {
         setHoverLine(null);
       });
     },
-    [toggleBreakpoint],
+    [toggleBreakpoint, setHoverLine],
   );
 
   const runCode = useCallback(() => {
@@ -422,7 +445,18 @@ function App() {
       type: "RUN_CODE",
       payload: { code, breakpoints },
     });
-  }, [breakpoints, clearFinishTimer, code]);
+  }, [
+    breakpoints,
+    clearFinishTimer,
+    code,
+    setCurrentLine,
+    setIsPaused,
+    setIsRunning,
+    setOutput,
+    setOutputDurationMs,
+    setRunStatus,
+    setVariables,
+  ]);
 
   const step = useCallback(() => {
     if (!sabRef.current) return;
@@ -433,7 +467,7 @@ function App() {
     Atomics.store(sabRef.current, IDX_CMD, CMD_STEP);
     Atomics.notify(sabRef.current, IDX_CMD);
     setIsPaused(false);
-  }, [breakpoints]);
+  }, [breakpoints, setIsPaused]);
 
   const continueExec = useCallback(() => {
     if (!sabRef.current) return;
@@ -444,7 +478,7 @@ function App() {
     Atomics.store(sabRef.current, IDX_CMD, CMD_RUN);
     Atomics.notify(sabRef.current, IDX_CMD);
     setIsPaused(false);
-  }, [breakpoints]);
+  }, [breakpoints, setIsPaused]);
 
   const stopExec = useCallback(() => {
     runIdRef.current += 1;
@@ -452,13 +486,7 @@ function App() {
     workerRef.current?.terminate();
     workerRef.current = null;
     sabRef.current = null;
-    setIsRunning(false);
-    setIsPaused(false);
-    setRunStatus("idle");
-    setOutputDurationMs(null);
-    setCurrentLine(null);
-    setHoverLine(null);
-    setVariables({});
+    resetExecution();
     setIsReady(false);
     setOutput((prev) => [...prev, "—— 已终止 ——"]);
     const worker = initWorker();
@@ -466,7 +494,14 @@ function App() {
       type: "UPDATE_BREAKPOINTS",
       payload: breakpoints,
     });
-  }, [breakpoints, clearFinishTimer, initWorker]);
+  }, [
+    breakpoints,
+    clearFinishTimer,
+    initWorker,
+    resetExecution,
+    setIsReady,
+    setOutput,
+  ]);
 
   const selectedTemplate =
     CODE_TEMPLATES.find((template) => template.id === selectedTemplateId) ??
@@ -477,14 +512,23 @@ function App() {
     setVariables({});
     setCurrentLine(null);
     setIsPaused(false);
-  }, [selectedTemplate.code]);
+  }, [
+    selectedTemplate.code,
+    setCode,
+    setCurrentLine,
+    setIsPaused,
+    setVariables,
+  ]);
 
-  const handleTemplateChange = useCallback((id: string) => {
-    setSelectedTemplateId(id);
-    setVariables({});
-    setCurrentLine(null);
-    setIsPaused(false);
-  }, []);
+  const handleTemplateChange = useCallback(
+    (id: string) => {
+      setSelectedTemplateId(id);
+      setVariables({});
+      setCurrentLine(null);
+      setIsPaused(false);
+    },
+    [setCurrentLine, setIsPaused, setSelectedTemplateId, setVariables],
+  );
 
   const status = useMemo(() => {
     if (!isReady) return "加载中";
