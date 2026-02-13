@@ -12,7 +12,7 @@ import CollapsiblePanel from "../../components/CollapsiblePanel";
 import BreakpointPanel from "./BreakpointPanel";
 import OutputPanel from "./OutputPanel";
 import VariablePanel from "./VariablePanel";
-import type { RunStatus, VariableScope } from "../../types";
+import type { Breakpoint, RunStatus, VariableScope } from "../../types";
 import { usePythonStore } from "../../store/usePythonStore";
 
 type PanelKey = "breakpoints" | "variables" | "output";
@@ -25,8 +25,9 @@ type PanelDef = {
   minOpenPx: number;
   defaultOpenSize?: Size;
   render: (ctx: {
-    breakpoints: number[];
-    onToggleBreakpoint: (line: number) => void;
+    breakpoints: Breakpoint[];
+    onSetBreakpointEnabled: (line: number, enabled: boolean) => void;
+    onRemoveBreakpoint: (line: number) => void;
     variableScopes: VariableScope[];
     output: string[];
   }) => React.ReactNode;
@@ -48,7 +49,8 @@ const PANEL_DEFS: PanelDef[] = [
     render: (ctx) => (
       <BreakpointPanel
         breakpoints={ctx.breakpoints}
-        onToggleBreakpoint={ctx.onToggleBreakpoint}
+        onSetBreakpointEnabled={ctx.onSetBreakpointEnabled}
+        onRemoveBreakpoint={ctx.onRemoveBreakpoint}
       />
     ),
   },
@@ -111,7 +113,7 @@ function canResizeDivider(
   const left = panelDefs[dividerIndex]?.key;
   const right = panelDefs[dividerIndex + 1]?.key;
   if (!left || !right) return false;
-  return openByKey[left] && openByKey[right];
+  return openByKey[left] || openByKey[right];
 }
 
 function PanelDivider(props: DividerProps & { isEnabled: boolean }) {
@@ -172,14 +174,16 @@ function PanelDivider(props: DividerProps & { isEnabled: boolean }) {
 export default function RightPanelStack() {
   const {
     breakpoints,
-    toggleBreakpoint,
+    setBreakpointEnabled,
+    removeBreakpoint,
     output,
     runStatus,
     outputDurationMs,
     variableScopes,
   } = usePythonStore((s) => ({
     breakpoints: s.breakpoints,
-    toggleBreakpoint: s.toggleBreakpoint,
+    setBreakpointEnabled: s.setBreakpointEnabled,
+    removeBreakpoint: s.removeBreakpoint,
     output: s.output,
     runStatus: s.runStatus,
     outputDurationMs: s.outputDurationMs,
@@ -302,7 +306,8 @@ export default function RightPanelStack() {
               >
                 {panel.render({
                   breakpoints,
-                  onToggleBreakpoint: toggleBreakpoint,
+                  onSetBreakpointEnabled: setBreakpointEnabled,
+                  onRemoveBreakpoint: removeBreakpoint,
                   variableScopes,
                   output,
                 })}

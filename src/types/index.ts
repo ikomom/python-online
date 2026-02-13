@@ -13,9 +13,15 @@ export type VariableScope = {
   variables: Record<string, string>;
 };
 
+export type Breakpoint = {
+  line: number;
+  enabled: boolean;
+};
+
 export type CodeTemplate = {
   id: string;
   label: string;
   description: string;
   code: string;
+  deps?: string[];
 };

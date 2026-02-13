@@ -4,8 +4,9 @@ type WorkerInboundMessage =
   | { type: "INIT_SAB"; payload: SharedArrayBuffer }
   | {
       type: "RUN_CODE";
-      payload: { code: string; breakpoints: number[] };
+      payload: { code: string; contextCode?: string; breakpoints: number[] };
     }
+  | { type: "LOAD_PACKAGES"; payload: { packages: string[] } }
   | { type: "UPDATE_BREAKPOINTS"; payload: number[] };
 
 type WorkerCtx = {
@@ -19,7 +20,7 @@ type WorkerCtx = {
 };
 
 type WorkerGlobal = WorkerCtx & {
-  should_pause?: (lineno: number) => boolean;
+  should_pause?: (lineno: number, depth: number) => boolean;
   on_break?: (lineno: number, frames: unknown) => void;
   wait_for_command?: () => void;
 };
@@ -29,15 +30,113 @@ const workerGlobal: WorkerGlobal = self as unknown as WorkerGlobal;
 
 // Shared Buffer Indices
 const IDX_CMD = 0;
+const IDX_BASE_DEPTH = 1;
 // Commands
 const CMD_RUN = 1;
 const CMD_PAUSE = 2; // Worker waits on this
-const CMD_STEP = 3;
+const CMD_STEP_OVER = 3;
+const CMD_STEP_IN = 4;
+const CMD_STEP_OUT = 5;
+const MAX_SCOPES = 8;
 const PYODIDE_INDEX_URL = "https://cdn.jsdelivr.net/pyodide/v0.29.3/full/";
 
 let pyodide: PyodideInterface | null = null;
 let sharedBuffer: Int32Array | null = null;
 let breakpoints: Set<number> = new Set();
+const loadedExtraPackageKeys: Set<string> = new Set();
+const basePackageKeys: Set<string> = new Set();
+
+function packageKey(pkg: string): string {
+  if (/^https?:\/\//i.test(pkg)) return pkg;
+  return pkg.toLowerCase();
+}
+
+function extractFirstCodeLocation(
+  text: string,
+): { filename: string; lineno: number } | null {
+  const match = text.match(/File "([^"]+)", line (\d+)/);
+  if (!match) return null;
+  const filename = String(match[1]);
+  const n = Number(match[2]);
+  if (!Number.isFinite(n)) return null;
+  return { filename, lineno: n };
+}
+
+function normalizeRunError(err: unknown): {
+  message: string;
+  traceback?: string;
+  lineno?: number;
+  filename?: string;
+} {
+  const anyErr = err as { message?: unknown; traceback?: unknown } | null;
+  const message =
+    anyErr && typeof anyErr === "object" && "message" in anyErr
+      ? String(anyErr.message ?? "")
+      : err instanceof Error
+        ? err.message
+        : String(err);
+
+  const traceback =
+    anyErr && typeof anyErr === "object" && typeof anyErr.traceback === "string"
+      ? anyErr.traceback
+      : undefined;
+
+  const location =
+    extractFirstCodeLocation(traceback ?? "") ??
+    extractFirstCodeLocation(message) ??
+    null;
+  return {
+    message,
+    traceback,
+    lineno: location?.lineno,
+    filename: location?.filename,
+  };
+}
+
+async function loadExtraPackages(requested: string[]) {
+  if (!pyodide) return;
+  const packages = requested
+    .map((p) => String(p).trim())
+    .filter(Boolean)
+    .filter(
+      (p) =>
+        !basePackageKeys.has(packageKey(p)) &&
+        !loadedExtraPackageKeys.has(packageKey(p)),
+    );
+  if (packages.length === 0) return;
+
+  ctx.postMessage({ type: "PACKAGES_LOADING", packages });
+
+  const toMicropip: string[] = [];
+  const loaded: string[] = [];
+
+  for (const pkg of packages) {
+    if (/^https?:\/\//i.test(pkg)) {
+      toMicropip.push(pkg);
+      continue;
+    }
+    try {
+      await pyodide.loadPackage(pkg);
+      loaded.push(pkg);
+      loadedExtraPackageKeys.add(packageKey(pkg));
+    } catch {
+      toMicropip.push(pkg);
+    }
+  }
+
+  if (toMicropip.length > 0) {
+    await pyodide.loadPackage("micropip");
+    pyodide.globals.set("__EXTRA_PKGS__", toMicropip);
+    await pyodide.runPythonAsync(`
+import micropip
+await micropip.install(__EXTRA_PKGS__)
+`);
+    for (const pkg of toMicropip) loadedExtraPackageKeys.add(packageKey(pkg));
+    loaded.push(...toMicropip);
+  }
+
+  ctx.postMessage({ type: "PACKAGES_LOADED", packages: loaded });
+}
 
 async function initPyodide() {
   try {
@@ -49,6 +148,31 @@ async function initPyodide() {
     pyodide.setStdout({
       batched: (msg) => ctx.postMessage({ type: "STDOUT", message: msg }),
     });
+
+    try {
+      const baseList = await pyodide.runPythonAsync(`
+import importlib.metadata as md
+names = []
+for dist in md.distributions():
+    name = dist.metadata.get("Name")
+    if name:
+        names.append(str(name))
+sorted(set(names))
+`);
+      const baseJs =
+        typeof baseList === "object" && baseList !== null && "toJs" in baseList
+          ? (baseList as { toJs: () => unknown }).toJs()
+          : baseList;
+      const packages = Array.isArray(baseJs)
+        ? baseJs.map((v) => String(v))
+        : [];
+      basePackageKeys.clear();
+      for (const p of packages) basePackageKeys.add(packageKey(p));
+      ctx.postMessage({ type: "BASE_PACKAGES", packages });
+    } catch {
+      basePackageKeys.clear();
+      ctx.postMessage({ type: "BASE_PACKAGES", packages: [] });
+    }
 
     ctx.postMessage({ type: "READY" });
   } catch (err) {
@@ -72,28 +196,73 @@ def safe_repr(value):
         except Exception:
             return "<unprintable>"
 
-def collect_frames(frame, max_depth=20):
-    frames = []
+def collect_scopes(frame, max_depth=8):
+    scopes = []
+
     depth = 0
     f = frame
     while f is not None and depth < max_depth:
+        if f.f_code.co_filename != "<user_code>":
+            break
+        name = str(f.f_code.co_name)
+
+        if name == "<module>":
+            g = f.f_globals
+
+            try:
+                ctx_keys = g.get("__CONTEXT_KEYS__", set())
+                ctx_keys = set(ctx_keys) if ctx_keys else set()
+            except Exception:
+                ctx_keys = set()
+
+            ctx_vars = {}
+            main_vars = {}
+
+            for k, v in g.items():
+                k = str(k)
+                if k.startswith("__"):
+                    continue
+                if k == "__CONTEXT_KEYS__":
+                    continue
+                if k in ctx_keys:
+                    ctx_vars[k] = safe_repr(v)
+                else:
+                    main_vars[k] = safe_repr(v)
+
+            scopes.append({"name": "主代码", "lineno": int(f.f_lineno), "locals": main_vars})
+            scopes.append({"name": "上下文", "lineno": 0, "locals": ctx_vars})
+            break
+
         locals_dict = {}
         for k, v in f.f_locals.items():
-            locals_dict[str(k)] = safe_repr(v)
-        frames.append({
-            "name": str(f.f_code.co_name),
+            k = str(k)
+            if k.startswith("__"):
+                continue
+            locals_dict[k] = safe_repr(v)
+        scopes.append({
+            "name": name,
             "lineno": int(f.f_lineno),
             "locals": locals_dict
         })
         f = f.f_back
         depth += 1
-    return frames
+    return scopes
+
+def frame_depth(frame, max_depth=8):
+    depth = 0
+    f = frame
+    while f is not None and depth < max_depth:
+        depth += 1
+        f = f.f_back
+    return depth
 
 def tracer(frame, event, arg):
     if event == 'line':
+        if frame.f_code.co_filename != "<user_code>":
+            return tracer
         lineno = frame.f_lineno
-        if js.should_pause(lineno):
-            js.on_break(lineno, collect_frames(frame))
+        if js.should_pause(lineno, frame_depth(frame)):
+            js.on_break(lineno, collect_scopes(frame))
             js.wait_for_command()
     return tracer
 
@@ -104,21 +273,34 @@ def clear_trace():
     sys.settrace(None)
 `;
 const RUNNER_CODE = `
+g = {}
+ctx_keys = set()
+if "__CONTEXT_CODE__" in globals() and __CONTEXT_CODE__:
+    ctx_obj = compile(__CONTEXT_CODE__, "<context>", "exec")
+    exec(ctx_obj, g)
+    ctx_keys = set(g.keys())
+g["__CONTEXT_KEYS__"] = ctx_keys
 code_obj = compile(__USER_CODE__, "<user_code>", "exec")
 try:
     set_trace()
-    exec(code_obj, {})
+    exec(code_obj, g)
 finally:
     clear_trace()
 `;
 
 // Exposed JS functions
-workerGlobal.should_pause = (lineno: number) => {
+workerGlobal.should_pause = (lineno: number, depth: number) => {
   if (!sharedBuffer) return false;
-  // Pause if breakpoint exists OR if previous command was STEP
-  // Note: If we are just RUNning, CMD is RUN. If we STEPped, CMD is STEP.
   const cmd = Atomics.load(sharedBuffer, IDX_CMD);
-  return breakpoints.has(lineno) || cmd === CMD_STEP;
+  if (breakpoints.has(lineno)) return true;
+
+  const baseDepth = Atomics.load(sharedBuffer, IDX_BASE_DEPTH);
+
+  if (cmd === CMD_STEP_IN) return true;
+  if (cmd === CMD_STEP_OVER) return depth <= baseDepth;
+  if (cmd === CMD_STEP_OUT) return depth < baseDepth;
+
+  return false;
 };
 
 workerGlobal.on_break = (lineno: number, locals: unknown) => {
@@ -129,7 +311,9 @@ workerGlobal.on_break = (lineno: number, locals: unknown) => {
         ? (locals as { toJs: () => unknown }).toJs()
         : null;
     if (Array.isArray(framesList)) {
-      variableScopes = framesList as { name: string; lineno: number; locals: unknown }[];
+      variableScopes = (
+        framesList as { name: string; lineno: number; locals: unknown }[]
+      ).slice(0, MAX_SCOPES);
     } else if (framesList) {
       variableScopes = [
         framesList as { name: string; lineno: number; locals: unknown },
@@ -186,15 +370,28 @@ ctx.onmessage = async (event: MessageEvent<WorkerInboundMessage>) => {
     if (sharedBuffer) Atomics.store(sharedBuffer, IDX_CMD, CMD_RUN);
 
     await pyodide.runPythonAsync(TRACER_CODE);
+    pyodide.globals.set("__CONTEXT_CODE__", payload.contextCode ?? "");
     pyodide.globals.set("__USER_CODE__", payload.code);
 
     try {
       await pyodide.runPythonAsync(RUNNER_CODE);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      ctx.postMessage({ type: "ERROR", message });
+      const normalized = normalizeRunError(err);
+      ctx.postMessage({ type: "ERROR", ...normalized });
     } finally {
       ctx.postMessage({ type: "DONE" });
+    }
+  } else if (type === "LOAD_PACKAGES") {
+    if (!pyodide) return;
+    try {
+      await loadExtraPackages(payload.packages);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      ctx.postMessage({
+        type: "PACKAGES_ERROR",
+        packages: payload.packages,
+        message,
+      });
     }
   } else if (type === "UPDATE_BREAKPOINTS") {
     breakpoints = new Set(payload);

@@ -1,12 +1,13 @@
 import { createWithEqualityFn } from "zustand/traditional";
 import { shallow } from "zustand/shallow";
-import type { RunStatus, VariableScope } from "../types";
+import type { Breakpoint, RunStatus, VariableScope } from "../types";
 
 export interface PythonState {
   // Editor State
   code: string;
+  contextCode: string;
   selectedTemplateId: string;
-  breakpoints: number[];
+  breakpoints: Breakpoint[];
 
   // Execution State
   isReady: boolean;
@@ -23,11 +24,14 @@ export interface PythonState {
 
   // Actions
   setCode: (code: string) => void;
+  setContextCode: (code: string) => void;
   setSelectedTemplateId: (id: string) => void;
   setBreakpoints: (
-    breakpoints: number[] | ((prev: number[]) => number[]),
+    breakpoints: Breakpoint[] | ((prev: Breakpoint[]) => Breakpoint[]),
   ) => void;
   toggleBreakpoint: (line: number) => void;
+  setBreakpointEnabled: (line: number, enabled: boolean) => void;
+  removeBreakpoint: (line: number) => void;
 
   setIsReady: (isReady: boolean) => void;
   setIsRunning: (isRunning: boolean) => void;
@@ -47,6 +51,7 @@ export const usePythonStore = createWithEqualityFn<PythonState>()(
   (set) => ({
     // Initial State
     code: "", // Will be set in App.tsx from templates
+    contextCode: "",
     selectedTemplateId: "basic",
     breakpoints: [],
 
@@ -63,6 +68,7 @@ export const usePythonStore = createWithEqualityFn<PythonState>()(
 
     // Actions
     setCode: (code) => set({ code }),
+    setContextCode: (contextCode) => set({ contextCode }),
     setSelectedTemplateId: (id) => set({ selectedTemplateId: id }),
     setBreakpoints: (breakpoints) =>
       set((state) => ({
@@ -73,13 +79,23 @@ export const usePythonStore = createWithEqualityFn<PythonState>()(
       })),
     toggleBreakpoint: (line) =>
       set((state) => {
-        const exists = state.breakpoints.includes(line);
+        const exists = state.breakpoints.some((b) => b.line === line);
         return {
           breakpoints: exists
-            ? state.breakpoints.filter((l) => l !== line)
-            : [...state.breakpoints, line],
+            ? state.breakpoints.filter((b) => b.line !== line)
+            : [...state.breakpoints, { line, enabled: true }],
         };
       }),
+    setBreakpointEnabled: (line, enabled) =>
+      set((state) => ({
+        breakpoints: state.breakpoints.map((b) =>
+          b.line === line ? { ...b, enabled } : b,
+        ),
+      })),
+    removeBreakpoint: (line) =>
+      set((state) => ({
+        breakpoints: state.breakpoints.filter((b) => b.line !== line),
+      })),
 
     setIsReady: (isReady) => set({ isReady }),
     setIsRunning: (isRunning) => set({ isRunning }),

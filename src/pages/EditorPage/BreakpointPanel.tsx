@@ -1,22 +1,26 @@
 import { useMemo } from "react";
-import { Button, Typography } from "antd";
+import { Button, Checkbox, Typography } from "antd";
+import { Trash2 } from "lucide-react";
+import type { Breakpoint } from "../../types";
 
-type BreakpointRow = { key: number; line: number };
+type BreakpointRow = Breakpoint & { key: number };
 
 type BreakpointPanelProps = {
-  breakpoints: number[];
-  onToggleBreakpoint: (line: number) => void;
+  breakpoints: Breakpoint[];
+  onSetBreakpointEnabled: (line: number, enabled: boolean) => void;
+  onRemoveBreakpoint: (line: number) => void;
 };
 
 export default function BreakpointPanel({
   breakpoints,
-  onToggleBreakpoint,
+  onSetBreakpointEnabled,
+  onRemoveBreakpoint,
 }: BreakpointPanelProps) {
   const rows = useMemo<BreakpointRow[]>(
     () =>
       [...breakpoints]
-        .sort((a, b) => a - b)
-        .map((line) => ({ key: line, line })),
+        .sort((a, b) => a.line - b.line)
+        .map((bp) => ({ ...bp, key: bp.line })),
     [breakpoints],
   );
 
@@ -35,16 +39,30 @@ export default function BreakpointPanel({
           rows.map((row) => (
             <div
               key={row.key}
-              className="flex items-center gap-2 px-2 py-1.5 border-b border-black/[0.08] text-xs"
+              className={`flex items-center gap-2 px-2 py-1.5 border-b border-black/[0.08] text-xs ${
+                row.enabled ? "" : "text-black/45"
+              }`}
             >
-              <div className="w-16">{row.line}</div>
-              <div className="flex-1">
+              <div className="w-16 flex items-center gap-2">
+                <Checkbox
+                  checked={row.enabled}
+                  onChange={(e) =>
+                    onSetBreakpointEnabled(row.line, e.target.checked)
+                  }
+                />
+                <span className={row.enabled ? "" : "line-through"}>
+                  {row.line}
+                </span>
+              </div>
+              <div className="flex-1 flex justify-end">
                 <Button
                   size="small"
-                  onClick={() => onToggleBreakpoint(row.line)}
-                >
-                  移除
-                </Button>
+                  type="text"
+                  danger
+                  aria-label="删除断点"
+                  icon={<Trash2 size={14} />}
+                  onClick={() => onRemoveBreakpoint(row.line)}
+                />
               </div>
             </div>
           ))

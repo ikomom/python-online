@@ -1,7 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
-import { Button, Layout, Select, Space, Tag, Tooltip, Typography } from "antd";
 import {
+  Button,
+  Layout,
+  Modal,
+  Select,
+  Space,
+  Tag,
+  Tooltip,
+  Typography,
+  message,
+} from "antd";
+import {
+  CornerDownRight,
+  CornerUpLeft,
   LoaderCircle,
   Play,
   PlayCircle,
@@ -12,18 +24,24 @@ import type { editor as MonacoEditor } from "monaco-editor";
 import { Pane, SplitPane } from "react-split-pane";
 import PyodideWorker from "./worker/pyodide.worker?worker";
 import RightPanelStack from "./pages/EditorPage/RightPanelStack";
+import ExtraDepsModal from "./components/ExtraDepsModal";
 import type { CodeTemplate } from "./types";
 import { usePythonStore } from "./store/usePythonStore";
 import "./App.css";
 
 const IDX_CMD = 0;
+const IDX_BASE_DEPTH = 1;
 const CMD_RUN = 1;
-const CMD_STEP = 3;
+const CMD_STEP_OVER = 3;
+const CMD_STEP_IN = 4;
+const CMD_STEP_OUT = 5;
 
 function RunControls(props: {
   onRun: () => void;
   onContinue: () => void;
-  onStep: () => void;
+  onStepOver: () => void;
+  onStepInto: () => void;
+  onStepOut: () => void;
   onStop: () => void;
 }) {
   const { isRunning, isPaused, isReady, hasBreakpoints, runStatus } =
@@ -31,7 +49,7 @@ function RunControls(props: {
       isRunning: s.isRunning,
       isPaused: s.isPaused,
       isReady: s.isReady,
-      hasBreakpoints: s.breakpoints.length > 0,
+      hasBreakpoints: s.breakpoints.some((b) => b.enabled),
       runStatus: s.runStatus,
     }));
 
@@ -104,15 +122,39 @@ function RunControls(props: {
           />
         </span>
       </Tooltip>
-      <Tooltip title="单步执行" placement="bottom">
+      <Tooltip title="单步（跳过函数）" placement="bottom">
         <span>
           <Button
             size="small"
             shape="circle"
-            onClick={props.onStep}
+            onClick={props.onStepOver}
             disabled={!isPaused}
-            aria-label="单步执行"
+            aria-label="单步（跳过函数）"
             icon={<StepForward size={14} />}
+          />
+        </span>
+      </Tooltip>
+      <Tooltip title="运行进函数" placement="bottom">
+        <span>
+          <Button
+            size="small"
+            shape="circle"
+            onClick={props.onStepInto}
+            disabled={!isPaused}
+            aria-label="运行进函数"
+            icon={<CornerDownRight size={14} />}
+          />
+        </span>
+      </Tooltip>
+      <Tooltip title="运行出函数" placement="bottom">
+        <span>
+          <Button
+            size="small"
+            shape="circle"
+            onClick={props.onStepOut}
+            disabled={!isPaused}
+            aria-label="运行出函数"
+            icon={<CornerUpLeft size={14} />}
           />
         </span>
       </Tooltip>
@@ -175,11 +217,19 @@ const CODE_TEMPLATES: CodeTemplate[] = [
     description: "适合在循环内打断点观察变量",
     code: 'total = 0\n\nfor i in range(1, 6):\n    total += i\n    avg = total / i\n    print(i, total, avg)\n\nprint("汇总:", total)',
   },
+  {
+    id: "httpbin",
+    label: "HTTP 请求",
+    description: "requests + httpbin.org 获取 JSON 并打印",
+    deps: ["requests"],
+    code: 'import requests\nimport json\n\n\ndef getRaw():\n    res = requests.get("https://httpbin.org/get")\n    obj = res.json()\n    print(json.dumps(obj, ensure_ascii=False, indent=2))\n\n\ngetRaw()\n',
+  },
 ];
 
 function App() {
   const {
     code,
+    contextCode,
     selectedTemplateId,
     breakpoints,
     isReady,
@@ -187,7 +237,9 @@ function App() {
     isPaused,
     currentLine,
     hoverLine,
+    variableScopes,
     setCode,
+    setContextCode,
     setSelectedTemplateId,
     toggleBreakpoint,
     setIsReady,
@@ -205,12 +257,36 @@ function App() {
   const workerRef = useRef<Worker | null>(null);
   const sabRef = useRef<Int32Array | null>(null);
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
+  const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
+  const hasRunErrorMarkerRef = useRef(false);
   const decorationsRef = useRef<string[]>([]);
   const runIdRef = useRef(0);
   const minEndAtRef = useRef(0);
   const finishTimerRef = useRef<number | null>(null);
   const hadErrorRef = useRef(false);
   const runStartedAtRef = useRef<number | null>(null);
+
+  const [depsModalOpen, setDepsModalOpen] = useState(false);
+  const [depsLoading, setDepsLoading] = useState(false);
+  const [basePackages, setBasePackages] = useState<string[]>([]);
+  const [loadedPackages, setLoadedPackages] = useState<string[]>([]);
+  const basePackagesRef = useRef<string[]>([]);
+  const loadedPackagesRef = useRef<string[]>([]);
+
+  const [contextModalOpen, setContextModalOpen] = useState(false);
+  const [contextDraft, setContextDraft] = useState("");
+
+  const [messageApi, messageContextHolder] = message.useMessage();
+
+  const enabledBreakpointLines = useMemo(
+    () => breakpoints.filter((b) => b.enabled).map((b) => b.line),
+    [breakpoints],
+  );
+
+  const allBreakpointLines = useMemo(
+    () => breakpoints.map((b) => b.line),
+    [breakpoints],
+  );
 
   // Initialize code from default template on first load
   useEffect(() => {
@@ -225,6 +301,53 @@ function App() {
     finishTimerRef.current = null;
   }, []);
 
+  const clearEditorRunError = useCallback(() => {
+    hasRunErrorMarkerRef.current = false;
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!editor || !monaco) return;
+    const model = editor.getModel();
+    if (!model) return;
+    monaco.editor.setModelMarkers(model, "python-run", []);
+  }, []);
+
+  const showEditorRunError = useCallback(
+    (args: { message: string; lineno?: number | null; filename?: string }) => {
+      const editor = editorRef.current;
+      const monaco = monacoRef.current;
+      if (!editor || !monaco) return;
+      const model = editor.getModel();
+      if (!model) return;
+
+      const rawLine =
+        typeof args.lineno === "number" && Number.isFinite(args.lineno)
+          ? args.lineno
+          : null;
+      const line =
+        args.filename === "<user_code>"
+          ? Math.min(Math.max(1, rawLine ?? 1), model.getLineCount())
+          : 1;
+
+      monaco.editor.setModelMarkers(model, "python-run", [
+        {
+          severity: monaco.MarkerSeverity.Error,
+          message:
+            args.filename && args.filename !== "<user_code>"
+              ? `上下文代码错误：${args.message}`
+              : args.message,
+          startLineNumber: line,
+          startColumn: 1,
+          endLineNumber: line,
+          endColumn: model.getLineMaxColumn(line),
+        },
+      ]);
+
+      hasRunErrorMarkerRef.current = true;
+      editor.revealLineInCenter(line);
+    },
+    [],
+  );
+
   const initWorker = useCallback((): Worker => {
     const worker = new PyodideWorker();
     workerRef.current = worker;
@@ -236,16 +359,69 @@ function App() {
     worker.postMessage({ type: "INIT_SAB", payload: sab });
 
     worker.onmessage = (event: MessageEvent) => {
-      const { type, message, lineno, scopes } = event.data;
+      const { type, message, lineno, filename, scopes, packages, traceback } =
+        event.data;
 
-      if (type === "READY") {
+      if (type === "BASE_PACKAGES") {
+        if (Array.isArray(packages)) {
+          const uniq: string[] = [];
+          const seen = new Set<string>();
+          for (const p of packages) {
+            const key = String(p).toLowerCase();
+            if (seen.has(key)) continue;
+            seen.add(key);
+            uniq.push(String(p));
+          }
+          basePackagesRef.current = uniq;
+          setBasePackages(uniq);
+        } else {
+          basePackagesRef.current = [];
+          setBasePackages([]);
+        }
+      } else if (type === "READY") {
         setIsReady(true);
+        if (loadedPackagesRef.current.length > 0) {
+          workerRef.current?.postMessage({
+            type: "LOAD_PACKAGES",
+            payload: { packages: loadedPackagesRef.current },
+          });
+        }
       } else if (type === "STDOUT") {
         setOutput((prev) => [...prev, message]);
       } else if (type === "PAUSED") {
         setIsPaused(true);
         setCurrentLine(lineno);
         setVariableScopes(Array.isArray(scopes) ? scopes : []);
+      } else if (type === "PACKAGES_LOADING") {
+        setDepsLoading(true);
+        const text = Array.isArray(packages) ? packages.join(", ") : "";
+        if (text) messageApi.loading(`正在加载依赖：${text}`, 1.2);
+      } else if (type === "PACKAGES_LOADED") {
+        setDepsLoading(false);
+        if (Array.isArray(packages) && packages.length > 0) {
+          setLoadedPackages((prev) => {
+            const merged = [...prev, ...packages];
+            const uniq: string[] = [];
+            const seen = new Set<string>();
+            for (const p of merged) {
+              const lowered = String(p).toLowerCase();
+              if (seen.has(lowered)) continue;
+              seen.add(lowered);
+              uniq.push(String(p));
+            }
+            loadedPackagesRef.current = uniq;
+            return uniq;
+          });
+          messageApi.success(`依赖加载成功：${packages.join(", ")}`);
+        } else {
+          messageApi.success("依赖加载成功");
+        }
+      } else if (type === "PACKAGES_ERROR") {
+        setDepsLoading(false);
+        const text = Array.isArray(packages) ? packages.join(", ") : "";
+        messageApi.error(
+          `依赖加载失败${text ? `（${text}）` : ""}：${String(message ?? "")}`,
+        );
       } else if (type === "DONE") {
         const runId = runIdRef.current;
         const now = performance.now();
@@ -277,7 +453,12 @@ function App() {
           finalize();
         }
       } else if (type === "ERROR") {
-        setOutput((prev) => [...prev, `错误：${message}`]);
+        const details =
+          typeof traceback === "string" && traceback.trim().length > 0
+            ? traceback
+            : String(message ?? "");
+        setOutput((prev) => [...prev, `错误：${String(message ?? "")}`]);
+        showEditorRunError({ message: details, lineno, filename });
         hadErrorRef.current = true;
       }
     };
@@ -285,6 +466,7 @@ function App() {
     return worker;
   }, [
     clearFinishTimer,
+    messageApi,
     setCurrentLine,
     setIsPaused,
     setIsReady,
@@ -293,6 +475,7 @@ function App() {
     setOutputDurationMs,
     setRunStatus,
     setVariableScopes,
+    showEditorRunError,
   ]);
 
   useEffect(() => {
@@ -307,10 +490,10 @@ function App() {
     if (workerRef.current) {
       workerRef.current.postMessage({
         type: "UPDATE_BREAKPOINTS",
-        payload: breakpoints,
+        payload: enabledBreakpointLines,
       });
     }
-  }, [breakpoints]);
+  }, [enabledBreakpointLines]);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -318,7 +501,13 @@ function App() {
 
     const newDecorations: MonacoEditor.IModelDeltaDecoration[] = [];
 
-    for (const line of breakpoints) {
+    const enabledSet = new Set(enabledBreakpointLines);
+    const anySet = new Set(allBreakpointLines);
+
+    for (const bp of breakpoints) {
+      const line = bp.line;
+      const isCurrent = currentLine === line;
+      const isEnabled = enabledSet.has(line);
       newDecorations.push({
         range: {
           startLineNumber: line,
@@ -328,13 +517,25 @@ function App() {
         },
         options: {
           isWholeLine: false,
-          glyphMarginClassName: "my-glyph-margin-breakpoint",
-          glyphMarginHoverMessage: { value: "断点" },
+          glyphMarginClassName: isCurrent
+            ? isEnabled
+              ? "my-glyph-margin-current-breakpoint"
+              : "my-glyph-margin-current-breakpoint-disabled"
+            : isEnabled
+              ? "my-glyph-margin-breakpoint"
+              : "my-glyph-margin-breakpoint-disabled",
+          glyphMarginHoverMessage: {
+            value: isEnabled ? "断点" : "断点（停用）",
+          },
         },
       });
     }
 
-    if (hoverLine !== null && !breakpoints.includes(hoverLine)) {
+    if (
+      hoverLine !== null &&
+      hoverLine !== currentLine &&
+      !anySet.has(hoverLine)
+    ) {
       newDecorations.push({
         range: {
           startLineNumber: hoverLine,
@@ -350,6 +551,22 @@ function App() {
     }
 
     if (currentLine !== null) {
+      if (!anySet.has(currentLine)) {
+        newDecorations.push({
+          range: {
+            startLineNumber: currentLine,
+            startColumn: 1,
+            endLineNumber: currentLine,
+            endColumn: 1,
+          },
+          options: {
+            isWholeLine: false,
+            glyphMarginClassName: "my-glyph-margin-current",
+            glyphMarginHoverMessage: { value: "当前执行行" },
+          },
+        });
+      }
+
       newDecorations.push({
         range: {
           startLineNumber: currentLine,
@@ -368,13 +585,26 @@ function App() {
       decorationsRef.current,
       newDecorations,
     );
-  }, [breakpoints, currentLine, hoverLine]);
+  }, [
+    allBreakpointLines,
+    breakpoints,
+    currentLine,
+    enabledBreakpointLines,
+    hoverLine,
+  ]);
 
   const handleEditorMount = useCallback<OnMount>(
     (editor, monaco) => {
       editorRef.current = editor;
+      monacoRef.current = monaco;
       const model = editor.getModel();
       if (model) monaco.editor.setModelLanguage(model, "python");
+      clearEditorRunError();
+
+      editor.onDidChangeModelContent(() => {
+        if (!hasRunErrorMarkerRef.current) return;
+        clearEditorRunError();
+      });
 
       editor.onMouseDown((e) => {
         if (
@@ -401,7 +631,7 @@ function App() {
         setHoverLine(null);
       });
     },
-    [toggleBreakpoint, setHoverLine],
+    [clearEditorRunError, toggleBreakpoint, setHoverLine],
   );
 
   const runCode = useCallback(() => {
@@ -410,7 +640,7 @@ function App() {
     hadErrorRef.current = false;
     runStartedAtRef.current = performance.now();
     minEndAtRef.current =
-      performance.now() + (breakpoints.length === 0 ? 100 : 0);
+      performance.now() + (enabledBreakpointLines.length === 0 ? 100 : 0);
     setOutput([]);
     setIsRunning(true);
     setIsPaused(false);
@@ -418,15 +648,18 @@ function App() {
     setOutputDurationMs(null);
     setCurrentLine(null);
     setVariableScopes([]);
+    clearEditorRunError();
 
     workerRef.current?.postMessage({
       type: "RUN_CODE",
-      payload: { code, breakpoints },
+      payload: { code, contextCode, breakpoints: enabledBreakpointLines },
     });
   }, [
-    breakpoints,
+    enabledBreakpointLines,
     clearFinishTimer,
+    clearEditorRunError,
     code,
+    contextCode,
     setCurrentLine,
     setIsPaused,
     setIsRunning,
@@ -436,27 +669,55 @@ function App() {
     setVariableScopes,
   ]);
 
-  const step = useCallback(() => {
-    if (!sabRef.current) return;
-    workerRef.current?.postMessage({
-      type: "UPDATE_BREAKPOINTS",
-      payload: breakpoints,
-    });
-    Atomics.store(sabRef.current, IDX_CMD, CMD_STEP);
-    Atomics.notify(sabRef.current, IDX_CMD);
-    setIsPaused(false);
-  }, [breakpoints, setIsPaused]);
-
   const continueExec = useCallback(() => {
     if (!sabRef.current) return;
     workerRef.current?.postMessage({
       type: "UPDATE_BREAKPOINTS",
-      payload: breakpoints,
+      payload: enabledBreakpointLines,
     });
+    Atomics.store(sabRef.current, IDX_BASE_DEPTH, 0);
     Atomics.store(sabRef.current, IDX_CMD, CMD_RUN);
     Atomics.notify(sabRef.current, IDX_CMD);
     setIsPaused(false);
-  }, [breakpoints, setIsPaused]);
+  }, [enabledBreakpointLines, setIsPaused]);
+
+  const baseDepth = Math.max(1, variableScopes.length);
+
+  const stepOver = useCallback(() => {
+    if (!sabRef.current) return;
+    workerRef.current?.postMessage({
+      type: "UPDATE_BREAKPOINTS",
+      payload: enabledBreakpointLines,
+    });
+    Atomics.store(sabRef.current, IDX_BASE_DEPTH, baseDepth);
+    Atomics.store(sabRef.current, IDX_CMD, CMD_STEP_OVER);
+    Atomics.notify(sabRef.current, IDX_CMD);
+    setIsPaused(false);
+  }, [baseDepth, enabledBreakpointLines, setIsPaused]);
+
+  const stepInto = useCallback(() => {
+    if (!sabRef.current) return;
+    workerRef.current?.postMessage({
+      type: "UPDATE_BREAKPOINTS",
+      payload: enabledBreakpointLines,
+    });
+    Atomics.store(sabRef.current, IDX_BASE_DEPTH, baseDepth);
+    Atomics.store(sabRef.current, IDX_CMD, CMD_STEP_IN);
+    Atomics.notify(sabRef.current, IDX_CMD);
+    setIsPaused(false);
+  }, [baseDepth, enabledBreakpointLines, setIsPaused]);
+
+  const stepOut = useCallback(() => {
+    if (!sabRef.current) return;
+    workerRef.current?.postMessage({
+      type: "UPDATE_BREAKPOINTS",
+      payload: enabledBreakpointLines,
+    });
+    Atomics.store(sabRef.current, IDX_BASE_DEPTH, baseDepth);
+    Atomics.store(sabRef.current, IDX_CMD, CMD_STEP_OUT);
+    Atomics.notify(sabRef.current, IDX_CMD);
+    setIsPaused(false);
+  }, [baseDepth, enabledBreakpointLines, setIsPaused]);
 
   const stopExec = useCallback(() => {
     runIdRef.current += 1;
@@ -470,42 +731,71 @@ function App() {
     const worker = initWorker();
     worker.postMessage({
       type: "UPDATE_BREAKPOINTS",
-      payload: breakpoints,
+      payload: enabledBreakpointLines,
     });
   }, [
-    breakpoints,
     clearFinishTimer,
+    enabledBreakpointLines,
     initWorker,
     resetExecution,
     setIsReady,
     setOutput,
   ]);
 
-  const selectedTemplate =
-    CODE_TEMPLATES.find((template) => template.id === selectedTemplateId) ??
-    CODE_TEMPLATES[0];
-
-  const applyTemplate = useCallback(() => {
-    setCode(selectedTemplate.code);
-    setVariableScopes([]);
-    setCurrentLine(null);
-    setIsPaused(false);
-  }, [
-    selectedTemplate.code,
-    setCode,
-    setCurrentLine,
-    setIsPaused,
-    setVariableScopes,
-  ]);
+  const loadExtraPackages = useCallback(
+    (packagesToLoad: string[]) => {
+      if (!workerRef.current || !isReady) return;
+      const loadedSet = new Set<string>();
+      for (const p of basePackagesRef.current) {
+        const key = /^https?:\/\//i.test(p) ? p : p.toLowerCase();
+        loadedSet.add(key);
+      }
+      for (const p of loadedPackagesRef.current) {
+        const key = /^https?:\/\//i.test(p) ? p : p.toLowerCase();
+        loadedSet.add(key);
+      }
+      const packages = packagesToLoad
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .filter((p) => {
+          const key = /^https?:\/\//i.test(p) ? p : p.toLowerCase();
+          return !loadedSet.has(key);
+        });
+      if (packages.length === 0) {
+        messageApi.info("这些依赖已加载");
+        return;
+      }
+      workerRef.current.postMessage({
+        type: "LOAD_PACKAGES",
+        payload: { packages },
+      });
+    },
+    [isReady, messageApi],
+  );
 
   const handleTemplateChange = useCallback(
     (id: string) => {
       setSelectedTemplateId(id);
+      const nextTemplate =
+        CODE_TEMPLATES.find((t) => t.id === id) ?? CODE_TEMPLATES[0];
+      setCode(nextTemplate.code);
+      if (nextTemplate.deps && nextTemplate.deps.length > 0) {
+        loadExtraPackages(nextTemplate.deps);
+      }
       setVariableScopes([]);
       setCurrentLine(null);
       setIsPaused(false);
+      clearEditorRunError();
     },
-    [setCurrentLine, setIsPaused, setSelectedTemplateId, setVariableScopes],
+    [
+      clearEditorRunError,
+      loadExtraPackages,
+      setCode,
+      setCurrentLine,
+      setIsPaused,
+      setSelectedTemplateId,
+      setVariableScopes,
+    ],
   );
 
   const status = useMemo(() => {
@@ -515,14 +805,22 @@ function App() {
     return "就绪";
   }, [isPaused, isReady, isRunning]);
 
+  const hasContext = contextCode.trim().length > 0;
+
   return (
     <Layout className="flex flex-col h-full">
+      {messageContextHolder}
       <Layout.Header className="flex items-center px-2 h-12! bg-transparent!">
         <Space size={6} align="center" className="min-w-0">
           <Typography.Text strong className="text-[13px]">
             Python 调试器
           </Typography.Text>
           <Tag className="ml-1 text-xs w-14 text-center!">{status}</Tag>
+          {hasContext ? (
+            <Tag className="ml-1 text-xs" color="blue">
+              上下文
+            </Tag>
+          ) : null}
           <Select
             value={selectedTemplateId}
             size="small"
@@ -547,20 +845,99 @@ function App() {
             )}
             onChange={handleTemplateChange}
           />
-          <Button size="small" onClick={applyTemplate} disabled={isRunning}>
-            加载模板
-          </Button>
+          <Tooltip title="加载额外依赖（优先 CDN）" placement="bottom">
+            <span>
+              <Button
+                size="small"
+                onClick={() => setDepsModalOpen(true)}
+                disabled={!isReady || isRunning || depsLoading}
+              >
+                加载依赖
+              </Button>
+            </span>
+          </Tooltip>
+          <Tooltip title="添加隐藏上下文代码" placement="bottom">
+            <span>
+              <Button
+                size="small"
+                onClick={() => {
+                  setContextDraft(contextCode);
+                  setContextModalOpen(true);
+                }}
+                disabled={isRunning}
+              >
+                上下文
+              </Button>
+            </span>
+          </Tooltip>
         </Space>
         <div className="flex-1" />
         <div className="flex items-center justify-end shrink-0 min-w-[120px]">
           <RunControls
             onRun={runCode}
             onContinue={continueExec}
-            onStep={step}
+            onStepOver={stepOver}
+            onStepInto={stepInto}
+            onStepOut={stepOut}
             onStop={stopExec}
           />
         </div>
       </Layout.Header>
+
+      <ExtraDepsModal
+        open={depsModalOpen}
+        loading={depsLoading}
+        basePackages={basePackages}
+        loadedPackages={loadedPackages}
+        onClose={() => setDepsModalOpen(false)}
+        onLoad={(pkgs) => loadExtraPackages(pkgs)}
+      />
+
+      <Modal
+        title="上下文代码"
+        open={contextModalOpen}
+        onCancel={() => setContextModalOpen(false)}
+        onOk={() => {
+          setContextCode(contextDraft);
+          setContextModalOpen(false);
+        }}
+        okText="保存"
+        cancelText="取消"
+        destroyOnClose={false}
+      >
+        <div className="flex flex-col gap-2">
+          <Typography.Text type="secondary" className="text-xs">
+            这里的代码不会显示在主编辑器里，但每次运行都会先执行，可在主代码中直接使用。
+          </Typography.Text>
+          <div className="h-[360px] border border-black/10 rounded overflow-hidden">
+            <Editor
+              height="100%"
+              defaultLanguage="python"
+              language="python"
+              theme="vs"
+              value={contextDraft}
+              onChange={(val) => setContextDraft(val || "")}
+              options={{
+                minimap: { enabled: false },
+                lineNumbers: "on",
+                scrollBeyondLastLine: false,
+                renderLineHighlight: "line",
+                fontSize: 13,
+                padding: { top: 12 },
+                automaticLayout: true,
+              }}
+            />
+          </div>
+          <div className="flex justify-end">
+            <Button
+              onClick={() => setContextDraft("")}
+              disabled={contextDraft.length === 0}
+            >
+              清空
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       <div className="flex-1 min-h-0">
         <SplitPane
