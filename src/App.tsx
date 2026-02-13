@@ -3,7 +3,6 @@ import Editor, { type OnMount } from "@monaco-editor/react";
 import {
   Button,
   Layout,
-  Modal,
   Select,
   Space,
   Tag,
@@ -22,19 +21,13 @@ import {
 } from "lucide-react";
 import type { editor as MonacoEditor } from "monaco-editor";
 import { Pane, SplitPane } from "react-split-pane";
-import PyodideWorker from "./worker/pyodide.worker?worker";
 import RightPanelStack from "./pages/EditorPage/RightPanelStack";
+import ContextCodeModal from "./components/ContextCodeModal";
 import ExtraDepsModal from "./components/ExtraDepsModal";
 import type { CodeTemplate } from "./types";
 import { usePythonStore } from "./store/usePythonStore";
+import { usePyodideWorkerRuntime } from "./features/pythonRunner";
 import "./App.css";
-
-const IDX_CMD = 0;
-const IDX_BASE_DEPTH = 1;
-const CMD_RUN = 1;
-const CMD_STEP_OVER = 3;
-const CMD_STEP_IN = 4;
-const CMD_STEP_OUT = 5;
 
 function RunControls(props: {
   onRun: () => void;
@@ -237,47 +230,36 @@ function App() {
     isPaused,
     currentLine,
     hoverLine,
-    variableScopes,
+    pausedDepth,
     setCode,
     setContextCode,
     setSelectedTemplateId,
     toggleBreakpoint,
-    setIsReady,
-    setIsRunning,
+    setBreakpoints,
     setIsPaused,
-    setRunStatus,
     setCurrentLine,
     setHoverLine,
-    setOutput,
     setVariableScopes,
-    setOutputDurationMs,
-    resetExecution,
   } = usePythonStore();
 
-  const workerRef = useRef<Worker | null>(null);
-  const sabRef = useRef<Int32Array | null>(null);
+  // Monaco Editor 实例，便于后续操作编辑器
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
+  // Monaco 全局对象，可调用 API 如设置语言、错误标记等
   const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
+  // 标记当前是否在编辑器中展示了运行错误
   const hasRunErrorMarkerRef = useRef(false);
+  // 保存编辑器装饰（断点、当前行等）的 ID，方便后续清除
   const decorationsRef = useRef<string[]>([]);
-  const runIdRef = useRef(0);
-  const minEndAtRef = useRef(0);
-  const finishTimerRef = useRef<number | null>(null);
-  const hadErrorRef = useRef(false);
-  const runStartedAtRef = useRef<number | null>(null);
 
+  // 是否显示“加载额外依赖”弹窗
   const [depsModalOpen, setDepsModalOpen] = useState(false);
-  const [depsLoading, setDepsLoading] = useState(false);
-  const [basePackages, setBasePackages] = useState<string[]>([]);
-  const [loadedPackages, setLoadedPackages] = useState<string[]>([]);
-  const basePackagesRef = useRef<string[]>([]);
-  const loadedPackagesRef = useRef<string[]>([]);
 
+  // 是否显示“上下文代码”弹窗
   const [contextModalOpen, setContextModalOpen] = useState(false);
   const [contextDraft, setContextDraft] = useState("");
 
+  // Ant Design 全局消息提示 API
   const [messageApi, messageContextHolder] = message.useMessage();
-
   const enabledBreakpointLines = useMemo(
     () => breakpoints.filter((b) => b.enabled).map((b) => b.line),
     [breakpoints],
@@ -294,12 +276,6 @@ function App() {
       setCode(CODE_TEMPLATES[0].code);
     }
   }, [code, setCode]);
-
-  const clearFinishTimer = useCallback(() => {
-    if (finishTimerRef.current === null) return;
-    window.clearTimeout(finishTimerRef.current);
-    finishTimerRef.current = null;
-  }, []);
 
   const clearEditorRunError = useCallback(() => {
     hasRunErrorMarkerRef.current = false;
@@ -348,152 +324,25 @@ function App() {
     [],
   );
 
-  const initWorker = useCallback((): Worker => {
-    const worker = new PyodideWorker();
-    workerRef.current = worker;
-
-    const sab = new SharedArrayBuffer(1024);
-    const int32 = new Int32Array(sab);
-    sabRef.current = int32;
-
-    worker.postMessage({ type: "INIT_SAB", payload: sab });
-
-    worker.onmessage = (event: MessageEvent) => {
-      const { type, message, lineno, filename, scopes, packages, traceback } =
-        event.data;
-
-      if (type === "BASE_PACKAGES") {
-        if (Array.isArray(packages)) {
-          const uniq: string[] = [];
-          const seen = new Set<string>();
-          for (const p of packages) {
-            const key = String(p).toLowerCase();
-            if (seen.has(key)) continue;
-            seen.add(key);
-            uniq.push(String(p));
-          }
-          basePackagesRef.current = uniq;
-          setBasePackages(uniq);
-        } else {
-          basePackagesRef.current = [];
-          setBasePackages([]);
-        }
-      } else if (type === "READY") {
-        setIsReady(true);
-        if (loadedPackagesRef.current.length > 0) {
-          workerRef.current?.postMessage({
-            type: "LOAD_PACKAGES",
-            payload: { packages: loadedPackagesRef.current },
-          });
-        }
-      } else if (type === "STDOUT") {
-        setOutput((prev) => [...prev, message]);
-      } else if (type === "PAUSED") {
-        setIsPaused(true);
-        setCurrentLine(lineno);
-        setVariableScopes(Array.isArray(scopes) ? scopes : []);
-      } else if (type === "PACKAGES_LOADING") {
-        setDepsLoading(true);
-        const text = Array.isArray(packages) ? packages.join(", ") : "";
-        if (text) messageApi.loading(`正在加载依赖：${text}`, 1.2);
-      } else if (type === "PACKAGES_LOADED") {
-        setDepsLoading(false);
-        if (Array.isArray(packages) && packages.length > 0) {
-          setLoadedPackages((prev) => {
-            const merged = [...prev, ...packages];
-            const uniq: string[] = [];
-            const seen = new Set<string>();
-            for (const p of merged) {
-              const lowered = String(p).toLowerCase();
-              if (seen.has(lowered)) continue;
-              seen.add(lowered);
-              uniq.push(String(p));
-            }
-            loadedPackagesRef.current = uniq;
-            return uniq;
-          });
-          messageApi.success(`依赖加载成功：${packages.join(", ")}`);
-        } else {
-          messageApi.success("依赖加载成功");
-        }
-      } else if (type === "PACKAGES_ERROR") {
-        setDepsLoading(false);
-        const text = Array.isArray(packages) ? packages.join(", ") : "";
-        messageApi.error(
-          `依赖加载失败${text ? `（${text}）` : ""}：${String(message ?? "")}`,
-        );
-      } else if (type === "DONE") {
-        const runId = runIdRef.current;
-        const now = performance.now();
-        const delayMs = Math.max(0, minEndAtRef.current - now);
-        const hadError = hadErrorRef.current;
-        const startedAt = runStartedAtRef.current;
-        const durationMs =
-          !hadError && startedAt !== null
-            ? Math.max(0, Math.round(now - startedAt))
-            : null;
-
-        const finalize = () => {
-          if (runIdRef.current !== runId) return;
-          setIsRunning(false);
-          setIsPaused(false);
-          setCurrentLine(null);
-          setRunStatus(hadError ? "error" : "success");
-          if (!hadError) setOutputDurationMs(durationMs);
-          setOutput((prev) => [
-            ...prev,
-            hadError ? "—— 执行失败 ——" : "—— 执行成功 ——",
-          ]);
-        };
-
-        if (delayMs > 0) {
-          clearFinishTimer();
-          finishTimerRef.current = window.setTimeout(finalize, delayMs);
-        } else {
-          finalize();
-        }
-      } else if (type === "ERROR") {
-        const details =
-          typeof traceback === "string" && traceback.trim().length > 0
-            ? traceback
-            : String(message ?? "");
-        setOutput((prev) => [...prev, `错误：${String(message ?? "")}`]);
-        showEditorRunError({ message: details, lineno, filename });
-        hadErrorRef.current = true;
-      }
-    };
-
-    return worker;
-  }, [
-    clearFinishTimer,
-    messageApi,
-    setCurrentLine,
-    setIsPaused,
-    setIsReady,
-    setIsRunning,
-    setOutput,
-    setOutputDurationMs,
-    setRunStatus,
-    setVariableScopes,
+  const {
+    depsLoading,
+    basePackages,
+    loadedPackages,
+    loadExtraPackages,
+    runCode,
+    continueExec,
+    stepOver,
+    stepInto,
+    stepOut,
+    stopExec,
+  } = usePyodideWorkerRuntime({
+    code,
+    contextCode,
+    enabledBreakpointLines,
+    clearEditorRunError,
     showEditorRunError,
-  ]);
-
-  useEffect(() => {
-    initWorker();
-    return () => {
-      workerRef.current?.terminate();
-    };
-  }, [initWorker]);
-
-  // Sync breakpoints with worker
-  useEffect(() => {
-    if (workerRef.current) {
-      workerRef.current.postMessage({
-        type: "UPDATE_BREAKPOINTS",
-        payload: enabledBreakpointLines,
-      });
-    }
-  }, [enabledBreakpointLines]);
+    messageApi,
+  });
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -634,143 +483,21 @@ function App() {
     [clearEditorRunError, toggleBreakpoint, setHoverLine],
   );
 
-  const runCode = useCallback(() => {
-    runIdRef.current += 1;
-    clearFinishTimer();
-    hadErrorRef.current = false;
-    runStartedAtRef.current = performance.now();
-    minEndAtRef.current =
-      performance.now() + (enabledBreakpointLines.length === 0 ? 100 : 0);
-    setOutput([]);
-    setIsRunning(true);
-    setIsPaused(false);
-    setRunStatus("running");
-    setOutputDurationMs(null);
-    setCurrentLine(null);
-    setVariableScopes([]);
-    clearEditorRunError();
+  const baseDepth = Math.max(1, pausedDepth);
 
-    workerRef.current?.postMessage({
-      type: "RUN_CODE",
-      payload: { code, contextCode, breakpoints: enabledBreakpointLines },
-    });
-  }, [
-    enabledBreakpointLines,
-    clearFinishTimer,
-    clearEditorRunError,
-    code,
-    contextCode,
-    setCurrentLine,
-    setIsPaused,
-    setIsRunning,
-    setOutput,
-    setOutputDurationMs,
-    setRunStatus,
-    setVariableScopes,
-  ]);
+  const handleStepOver = useCallback(
+    () => stepOver(baseDepth),
+    [baseDepth, stepOver],
+  );
 
-  const continueExec = useCallback(() => {
-    if (!sabRef.current) return;
-    workerRef.current?.postMessage({
-      type: "UPDATE_BREAKPOINTS",
-      payload: enabledBreakpointLines,
-    });
-    Atomics.store(sabRef.current, IDX_BASE_DEPTH, 0);
-    Atomics.store(sabRef.current, IDX_CMD, CMD_RUN);
-    Atomics.notify(sabRef.current, IDX_CMD);
-    setIsPaused(false);
-  }, [enabledBreakpointLines, setIsPaused]);
+  const handleStepInto = useCallback(
+    () => stepInto(baseDepth),
+    [baseDepth, stepInto],
+  );
 
-  const baseDepth = Math.max(1, variableScopes.length);
-
-  const stepOver = useCallback(() => {
-    if (!sabRef.current) return;
-    workerRef.current?.postMessage({
-      type: "UPDATE_BREAKPOINTS",
-      payload: enabledBreakpointLines,
-    });
-    Atomics.store(sabRef.current, IDX_BASE_DEPTH, baseDepth);
-    Atomics.store(sabRef.current, IDX_CMD, CMD_STEP_OVER);
-    Atomics.notify(sabRef.current, IDX_CMD);
-    setIsPaused(false);
-  }, [baseDepth, enabledBreakpointLines, setIsPaused]);
-
-  const stepInto = useCallback(() => {
-    if (!sabRef.current) return;
-    workerRef.current?.postMessage({
-      type: "UPDATE_BREAKPOINTS",
-      payload: enabledBreakpointLines,
-    });
-    Atomics.store(sabRef.current, IDX_BASE_DEPTH, baseDepth);
-    Atomics.store(sabRef.current, IDX_CMD, CMD_STEP_IN);
-    Atomics.notify(sabRef.current, IDX_CMD);
-    setIsPaused(false);
-  }, [baseDepth, enabledBreakpointLines, setIsPaused]);
-
-  const stepOut = useCallback(() => {
-    if (!sabRef.current) return;
-    workerRef.current?.postMessage({
-      type: "UPDATE_BREAKPOINTS",
-      payload: enabledBreakpointLines,
-    });
-    Atomics.store(sabRef.current, IDX_BASE_DEPTH, baseDepth);
-    Atomics.store(sabRef.current, IDX_CMD, CMD_STEP_OUT);
-    Atomics.notify(sabRef.current, IDX_CMD);
-    setIsPaused(false);
-  }, [baseDepth, enabledBreakpointLines, setIsPaused]);
-
-  const stopExec = useCallback(() => {
-    runIdRef.current += 1;
-    clearFinishTimer();
-    workerRef.current?.terminate();
-    workerRef.current = null;
-    sabRef.current = null;
-    resetExecution();
-    setIsReady(false);
-    setOutput((prev) => [...prev, "—— 已终止 ——"]);
-    const worker = initWorker();
-    worker.postMessage({
-      type: "UPDATE_BREAKPOINTS",
-      payload: enabledBreakpointLines,
-    });
-  }, [
-    clearFinishTimer,
-    enabledBreakpointLines,
-    initWorker,
-    resetExecution,
-    setIsReady,
-    setOutput,
-  ]);
-
-  const loadExtraPackages = useCallback(
-    (packagesToLoad: string[]) => {
-      if (!workerRef.current || !isReady) return;
-      const loadedSet = new Set<string>();
-      for (const p of basePackagesRef.current) {
-        const key = /^https?:\/\//i.test(p) ? p : p.toLowerCase();
-        loadedSet.add(key);
-      }
-      for (const p of loadedPackagesRef.current) {
-        const key = /^https?:\/\//i.test(p) ? p : p.toLowerCase();
-        loadedSet.add(key);
-      }
-      const packages = packagesToLoad
-        .map((p) => p.trim())
-        .filter(Boolean)
-        .filter((p) => {
-          const key = /^https?:\/\//i.test(p) ? p : p.toLowerCase();
-          return !loadedSet.has(key);
-        });
-      if (packages.length === 0) {
-        messageApi.info("这些依赖已加载");
-        return;
-      }
-      workerRef.current.postMessage({
-        type: "LOAD_PACKAGES",
-        payload: { packages },
-      });
-    },
-    [isReady, messageApi],
+  const handleStepOut = useCallback(
+    () => stepOut(baseDepth),
+    [baseDepth, stepOut],
   );
 
   const handleTemplateChange = useCallback(
@@ -779,6 +506,7 @@ function App() {
       const nextTemplate =
         CODE_TEMPLATES.find((t) => t.id === id) ?? CODE_TEMPLATES[0];
       setCode(nextTemplate.code);
+      setBreakpoints([]);
       if (nextTemplate.deps && nextTemplate.deps.length > 0) {
         loadExtraPackages(nextTemplate.deps);
       }
@@ -791,6 +519,7 @@ function App() {
       clearEditorRunError,
       loadExtraPackages,
       setCode,
+      setBreakpoints,
       setCurrentLine,
       setIsPaused,
       setSelectedTemplateId,
@@ -876,9 +605,9 @@ function App() {
           <RunControls
             onRun={runCode}
             onContinue={continueExec}
-            onStepOver={stepOver}
-            onStepInto={stepInto}
-            onStepOut={stepOut}
+            onStepOver={handleStepOver}
+            onStepInto={handleStepInto}
+            onStepOut={handleStepOut}
             onStop={stopExec}
           />
         </div>
@@ -890,54 +619,19 @@ function App() {
         basePackages={basePackages}
         loadedPackages={loadedPackages}
         onClose={() => setDepsModalOpen(false)}
-        onLoad={(pkgs) => loadExtraPackages(pkgs)}
+        onLoad={loadExtraPackages}
       />
 
-      <Modal
-        title="上下文代码"
+      <ContextCodeModal
         open={contextModalOpen}
-        onCancel={() => setContextModalOpen(false)}
-        onOk={() => {
+        value={contextDraft}
+        onChange={setContextDraft}
+        onClose={() => setContextModalOpen(false)}
+        onSave={() => {
           setContextCode(contextDraft);
           setContextModalOpen(false);
         }}
-        okText="保存"
-        cancelText="取消"
-        destroyOnClose={false}
-      >
-        <div className="flex flex-col gap-2">
-          <Typography.Text type="secondary" className="text-xs">
-            这里的代码不会显示在主编辑器里，但每次运行都会先执行，可在主代码中直接使用。
-          </Typography.Text>
-          <div className="h-[360px] border border-black/10 rounded overflow-hidden">
-            <Editor
-              height="100%"
-              defaultLanguage="python"
-              language="python"
-              theme="vs"
-              value={contextDraft}
-              onChange={(val) => setContextDraft(val || "")}
-              options={{
-                minimap: { enabled: false },
-                lineNumbers: "on",
-                scrollBeyondLastLine: false,
-                renderLineHighlight: "line",
-                fontSize: 13,
-                padding: { top: 12 },
-                automaticLayout: true,
-              }}
-            />
-          </div>
-          <div className="flex justify-end">
-            <Button
-              onClick={() => setContextDraft("")}
-              disabled={contextDraft.length === 0}
-            >
-              清空
-            </Button>
-          </div>
-        </div>
-      </Modal>
+      />
 
       <div className="flex-1 min-h-0">
         <SplitPane

@@ -26,6 +26,7 @@ type PanelDef = {
   defaultOpenSize?: Size;
   render: (ctx: {
     breakpoints: Breakpoint[];
+    code: string;
     onSetBreakpointEnabled: (line: number, enabled: boolean) => void;
     onRemoveBreakpoint: (line: number) => void;
     variableScopes: VariableScope[];
@@ -49,6 +50,7 @@ const PANEL_DEFS: PanelDef[] = [
     render: (ctx) => (
       <BreakpointPanel
         breakpoints={ctx.breakpoints}
+        code={ctx.code}
         onSetBreakpointEnabled={ctx.onSetBreakpointEnabled}
         onRemoveBreakpoint={ctx.onRemoveBreakpoint}
       />
@@ -173,6 +175,7 @@ function PanelDivider(props: DividerProps & { isEnabled: boolean }) {
 
 export default function RightPanelStack() {
   const {
+    code,
     breakpoints,
     setBreakpointEnabled,
     removeBreakpoint,
@@ -181,6 +184,7 @@ export default function RightPanelStack() {
     outputDurationMs,
     variableScopes,
   } = usePythonStore((s) => ({
+    code: s.code,
     breakpoints: s.breakpoints,
     setBreakpointEnabled: s.setBreakpointEnabled,
     removeBreakpoint: s.removeBreakpoint,
@@ -306,6 +310,7 @@ export default function RightPanelStack() {
               >
                 {panel.render({
                   breakpoints,
+                  code,
                   onSetBreakpointEnabled: setBreakpointEnabled,
                   onRemoveBreakpoint: removeBreakpoint,
                   variableScopes,

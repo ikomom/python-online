@@ -16,6 +16,7 @@ export interface PythonState {
   runStatus: RunStatus;
   currentLine: number | null;
   hoverLine: number | null;
+  pausedDepth: number;
 
   // Output Data
   output: string[];
@@ -39,6 +40,7 @@ export interface PythonState {
   setRunStatus: (status: RunStatus) => void;
   setCurrentLine: (line: number | null) => void;
   setHoverLine: (line: number | null) => void;
+  setPausedDepth: (depth: number) => void;
 
   setOutput: (output: string[] | ((prev: string[]) => string[])) => void;
   setVariableScopes: (scopes: VariableScope[]) => void;
@@ -61,6 +63,7 @@ export const usePythonStore = createWithEqualityFn<PythonState>()(
     runStatus: "idle",
     currentLine: null,
     hoverLine: null,
+    pausedDepth: 1,
 
     output: [],
     variableScopes: [],
@@ -103,6 +106,7 @@ export const usePythonStore = createWithEqualityFn<PythonState>()(
     setRunStatus: (runStatus) => set({ runStatus }),
     setCurrentLine: (currentLine) => set({ currentLine }),
     setHoverLine: (hoverLine) => set({ hoverLine }),
+    setPausedDepth: (pausedDepth) => set({ pausedDepth }),
 
     setOutput: (output) =>
       set((state) => ({
@@ -118,6 +122,7 @@ export const usePythonStore = createWithEqualityFn<PythonState>()(
         runStatus: "idle",
         currentLine: null,
         hoverLine: null,
+        pausedDepth: 1,
         variableScopes: [],
         outputDurationMs: null,
       }),

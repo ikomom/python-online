@@ -1,4 +1,15 @@
 import { loadPyodide, PyodideInterface } from "pyodide";
+import {
+  CMD_PAUSE,
+  CMD_RUN,
+  CMD_STEP_IN,
+  CMD_STEP_OUT,
+  CMD_STEP_OVER,
+  IDX_BASE_DEPTH,
+  IDX_BP_COUNT,
+  IDX_BP_START,
+  IDX_CMD,
+} from "./debugProtocol";
 
 type WorkerInboundMessage =
   | { type: "INIT_SAB"; payload: SharedArrayBuffer }
@@ -21,23 +32,15 @@ type WorkerCtx = {
 
 type WorkerGlobal = WorkerCtx & {
   should_pause?: (lineno: number, depth: number) => boolean;
-  on_break?: (lineno: number, frames: unknown) => void;
+  on_break?: (lineno: number, frames: unknown, depth: number) => void;
   wait_for_command?: () => void;
 };
 
 const ctx: WorkerCtx = self as unknown as WorkerCtx;
 const workerGlobal: WorkerGlobal = self as unknown as WorkerGlobal;
 
-// Shared Buffer Indices
-const IDX_CMD = 0;
-const IDX_BASE_DEPTH = 1;
-// Commands
-const CMD_RUN = 1;
-const CMD_PAUSE = 2; // Worker waits on this
-const CMD_STEP_OVER = 3;
-const CMD_STEP_IN = 4;
-const CMD_STEP_OUT = 5;
-const MAX_SCOPES = 8;
+const DEBUG_MAX_DEPTH = 18;
+const MAX_SCOPES = DEBUG_MAX_DEPTH;
 const PYODIDE_INDEX_URL = "https://cdn.jsdelivr.net/pyodide/v0.29.3/full/";
 
 let pyodide: PyodideInterface | null = null;
@@ -196,7 +199,7 @@ def safe_repr(value):
         except Exception:
             return "<unprintable>"
 
-def collect_scopes(frame, max_depth=8):
+def collect_scopes(frame, max_depth=${DEBUG_MAX_DEPTH}):
     scopes = []
 
     depth = 0
@@ -248,7 +251,7 @@ def collect_scopes(frame, max_depth=8):
         depth += 1
     return scopes
 
-def frame_depth(frame, max_depth=8):
+def frame_depth(frame, max_depth=${DEBUG_MAX_DEPTH}):
     depth = 0
     f = frame
     while f is not None and depth < max_depth:
@@ -261,8 +264,9 @@ def tracer(frame, event, arg):
         if frame.f_code.co_filename != "<user_code>":
             return tracer
         lineno = frame.f_lineno
-        if js.should_pause(lineno, frame_depth(frame)):
-            js.on_break(lineno, collect_scopes(frame))
+        depth = frame_depth(frame)
+        if js.should_pause(lineno, depth):
+            js.on_break(lineno, collect_scopes(frame), depth)
             js.wait_for_command()
     return tracer
 
@@ -289,10 +293,21 @@ finally:
 `;
 
 // Exposed JS functions
+const isBreakpoint = (lineno: number) => {
+  if (sharedBuffer) {
+    const maxCount = Math.max(0, sharedBuffer.length - IDX_BP_START);
+    const count = Math.min(Atomics.load(sharedBuffer, IDX_BP_COUNT), maxCount);
+    for (let i = 0; i < count; i += 1) {
+      if (Atomics.load(sharedBuffer, IDX_BP_START + i) === lineno) return true;
+    }
+  }
+  return breakpoints.has(lineno);
+};
+
 workerGlobal.should_pause = (lineno: number, depth: number) => {
   if (!sharedBuffer) return false;
   const cmd = Atomics.load(sharedBuffer, IDX_CMD);
-  if (breakpoints.has(lineno)) return true;
+  if (isBreakpoint(lineno)) return true;
 
   const baseDepth = Atomics.load(sharedBuffer, IDX_BASE_DEPTH);
 
@@ -303,7 +318,7 @@ workerGlobal.should_pause = (lineno: number, depth: number) => {
   return false;
 };
 
-workerGlobal.on_break = (lineno: number, locals: unknown) => {
+workerGlobal.on_break = (lineno: number, locals: unknown, depth: number) => {
   let variableScopes: { name: string; lineno: number; locals: unknown }[] = [];
   try {
     const framesList =
@@ -342,7 +357,7 @@ workerGlobal.on_break = (lineno: number, locals: unknown) => {
     };
   });
 
-  ctx.postMessage({ type: "PAUSED", lineno, scopes });
+  ctx.postMessage({ type: "PAUSED", lineno, scopes, depth });
 };
 
 workerGlobal.wait_for_command = () => {
