@@ -300,6 +300,7 @@ const isBreakpoint = (lineno: number) => {
     for (let i = 0; i < count; i += 1) {
       if (Atomics.load(sharedBuffer, IDX_BP_START + i) === lineno) return true;
     }
+    return false;
   }
   return breakpoints.has(lineno);
 };
