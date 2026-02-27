@@ -1,6 +1,6 @@
 import { createWithEqualityFn } from "zustand/traditional";
 import { shallow } from "zustand/shallow";
-import type { Breakpoint, RunStatus, VariableScope } from "../types";
+import type { Breakpoint, GraphData, PositioningData, PositioningResult, RunStatus, ShortestPathResult, VariableScope } from "../types";
 
 export interface PythonState {
   // Editor State
@@ -22,6 +22,8 @@ export interface PythonState {
   output: string[];
   variableScopes: VariableScope[];
   outputDurationMs: number | null;
+  graphData: GraphData | null;
+  graphResult: ShortestPathResult | null;
 
   // Actions
   setCode: (code: string) => void;
@@ -45,6 +47,13 @@ export interface PythonState {
   setOutput: (output: string[] | ((prev: string[]) => string[])) => void;
   setVariableScopes: (scopes: VariableScope[]) => void;
   setOutputDurationMs: (ms: number | null) => void;
+  setGraphData: (data: GraphData | null) => void;
+  setGraphResult: (result: ShortestPathResult | null) => void;
+
+  positioningData: PositioningData | null;
+  positioningResult: PositioningResult | null;
+  setPositioningData: (data: PositioningData | null) => void;
+  setPositioningResult: (result: PositioningResult | null) => void;
 
   resetExecution: () => void;
 }
@@ -68,6 +77,10 @@ export const usePythonStore = createWithEqualityFn<PythonState>()(
     output: [],
     variableScopes: [],
     outputDurationMs: null,
+    graphData: null,
+    graphResult: null,
+    positioningData: null,
+    positioningResult: null,
 
     // Actions
     setCode: (code) => set({ code }),
@@ -114,6 +127,10 @@ export const usePythonStore = createWithEqualityFn<PythonState>()(
       })),
     setVariableScopes: (variableScopes) => set({ variableScopes }),
     setOutputDurationMs: (outputDurationMs) => set({ outputDurationMs }),
+    setGraphData: (graphData) => set({ graphData }),
+    setGraphResult: (graphResult) => set({ graphResult }),
+    setPositioningData: (positioningData) => set({ positioningData }),
+    setPositioningResult: (positioningResult) => set({ positioningResult }),
 
     resetExecution: () =>
       set({
@@ -125,6 +142,8 @@ export const usePythonStore = createWithEqualityFn<PythonState>()(
         pausedDepth: 1,
         variableScopes: [],
         outputDurationMs: null,
+        graphResult: null,
+        positioningResult: null,
       }),
   }),
   shallow,

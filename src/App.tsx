@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import {
   Button,
   Layout,
+  Segmented,
   Select,
   Space,
   Tag,
@@ -220,6 +222,7 @@ const CODE_TEMPLATES: CodeTemplate[] = [
 ];
 
 function App() {
+  const navigate = useNavigate();
   const {
     code,
     contextCode,
@@ -503,8 +506,7 @@ function App() {
   const handleTemplateChange = useCallback(
     (id: string) => {
       setSelectedTemplateId(id);
-      const nextTemplate =
-        CODE_TEMPLATES.find((t) => t.id === id) ?? CODE_TEMPLATES[0];
+      const nextTemplate = CODE_TEMPLATES.find((t) => t.id === id) ?? CODE_TEMPLATES[0];
       setCode(nextTemplate.code);
       setBreakpoints([]);
       if (nextTemplate.deps && nextTemplate.deps.length > 0) {
@@ -541,64 +543,74 @@ function App() {
       {messageContextHolder}
       <Layout.Header className="flex items-center px-2 h-12! bg-transparent!">
         <Space size={6} align="center" className="min-w-0">
-          <Typography.Text strong className="text-[13px]">
-            Python 调试器
-          </Typography.Text>
+          <Segmented
+            size="small"
+            value="debugger"
+            options={[
+              { label: "调试器", value: "debugger" },
+              { label: "编程挑战", value: "challenge" },
+            ]}
+            onChange={(v) => {
+              if (v === "challenge") navigate("/challenge");
+            }}
+          />
           <Tag className="ml-1 text-xs w-14 text-center!">{status}</Tag>
           {hasContext ? (
             <Tag className="ml-1 text-xs" color="blue">
               上下文
             </Tag>
           ) : null}
-          <Select
-            value={selectedTemplateId}
-            size="small"
-            className="min-w-0"
-            popupMatchSelectWidth={false}
-            disabled={isRunning}
-            options={CODE_TEMPLATES.map((t) => ({
-              value: t.id,
-              label: `${t.label}`,
-              rawLabel: t.label,
-              description: t.description,
-            }))}
-            optionRender={(option) => (
-              <div className="flex flex-col w-full max-w-full">
-                <div className="text-[13px] leading-5 break-words whitespace-normal">
-                  {String(option.data.rawLabel ?? option.label)}
-                </div>
-                <div className="text-xs text-black/45 leading-4 break-words whitespace-normal">
-                  {String(option.data.description ?? "")}
-                </div>
-              </div>
-            )}
-            onChange={handleTemplateChange}
-          />
-          <Tooltip title="加载额外依赖（优先 CDN）" placement="bottom">
-            <span>
-              <Button
+          <>
+            <Select
+                value={selectedTemplateId}
                 size="small"
-                onClick={() => setDepsModalOpen(true)}
-                disabled={!isReady || isRunning || depsLoading}
-              >
-                加载依赖
-              </Button>
-            </span>
-          </Tooltip>
-          <Tooltip title="添加隐藏上下文代码" placement="bottom">
-            <span>
-              <Button
-                size="small"
-                onClick={() => {
-                  setContextDraft(contextCode);
-                  setContextModalOpen(true);
-                }}
+                className="min-w-0"
+                popupMatchSelectWidth={false}
                 disabled={isRunning}
-              >
-                上下文
-              </Button>
-            </span>
-          </Tooltip>
+                options={CODE_TEMPLATES.map((t) => ({
+                  value: t.id,
+                  label: t.label,
+                  rawLabel: t.label,
+                  description: t.description,
+                }))}
+                optionRender={(option) => (
+                  <div className="flex flex-col w-full max-w-full">
+                    <div className="text-[13px] leading-5 break-words whitespace-normal">
+                      {String(option.data.rawLabel ?? option.label)}
+                    </div>
+                    <div className="text-xs text-black/45 leading-4 break-words whitespace-normal">
+                      {String(option.data.description ?? "")}
+                    </div>
+                  </div>
+                )}
+                onChange={handleTemplateChange}
+              />
+              <Tooltip title="加载额外依赖（优先 CDN）" placement="bottom">
+                <span>
+                  <Button
+                    size="small"
+                    onClick={() => setDepsModalOpen(true)}
+                    disabled={!isReady || isRunning || depsLoading}
+                  >
+                    加载依赖
+                  </Button>
+                </span>
+              </Tooltip>
+              <Tooltip title="添加隐藏上下文代码" placement="bottom">
+                <span>
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      setContextDraft(contextCode);
+                      setContextModalOpen(true);
+                    }}
+                    disabled={isRunning}
+                  >
+                    上下文
+                  </Button>
+                </span>
+              </Tooltip>
+            </>
         </Space>
         <div className="flex-1" />
         <div className="flex items-center justify-end shrink-0 min-w-[120px]">
@@ -660,7 +672,7 @@ function App() {
           </Pane>
           <Pane minSize={280} className="min-h-0">
             <div className="h-full">
-              <RightPanelStack />
+              <RightPanelStack activeTab="debugger" />
             </div>
           </Pane>
         </SplitPane>

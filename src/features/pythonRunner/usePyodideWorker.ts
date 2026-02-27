@@ -53,6 +53,8 @@ export function usePyodideWorkerRuntime(args: {
     setVariableScopes,
     setOutputDurationMs,
     resetExecution,
+    setGraphResult,
+    setPositioningResult,
   } = usePythonStore();
 
   const workerRef = useRef<Worker | null>(null);
@@ -202,6 +204,26 @@ export function usePyodideWorkerRuntime(args: {
         } else {
           finalize();
         }
+      } else if (type === "GRAPH_RESULT") {
+        const { path, totalWeight, userPath, optimalWeight } = event.data;
+        setGraphResult({
+          path: Array.isArray(path) ? path : [],
+          totalWeight: Number(totalWeight),
+          userPath: Array.isArray(userPath) && userPath.length > 0 ? userPath : undefined,
+          optimalWeight: typeof optimalWeight === "number" ? optimalWeight : undefined,
+        });
+      } else if (type === "POSITIONING_RESULT") {
+        const { userLng, userLat, optimalLng, optimalLat } = event.data;
+        if (userLng !== null && userLat !== null) {
+          setPositioningResult({
+            userLng: Number(userLng),
+            userLat: Number(userLat),
+            optimalLng: typeof optimalLng === "number" ? optimalLng : undefined,
+            optimalLat: typeof optimalLat === "number" ? optimalLat : undefined,
+          });
+        } else {
+          setPositioningResult(null);
+        }
       } else if (type === "ERROR") {
         const details =
           typeof traceback === "string" && traceback.trim().length > 0
@@ -219,6 +241,8 @@ export function usePyodideWorkerRuntime(args: {
     enabledBreakpointLinesRef,
     messageApi,
     setCurrentLine,
+    setGraphResult,
+    setPositioningResult,
     setIsPaused,
     setIsReady,
     setIsRunning,
@@ -263,6 +287,8 @@ export function usePyodideWorkerRuntime(args: {
     setOutputDurationMs(null);
     setCurrentLine(null);
     setVariableScopes([]);
+    setGraphResult(null);
+    setPositioningResult(null);
     clearEditorRunError();
 
     workerRef.current?.postMessage({
@@ -280,6 +306,8 @@ export function usePyodideWorkerRuntime(args: {
     contextCode,
     enabledBreakpointLines,
     setCurrentLine,
+    setGraphResult,
+    setPositioningResult,
     setIsPaused,
     setIsRunning,
     setOutput,
@@ -290,6 +318,7 @@ export function usePyodideWorkerRuntime(args: {
 
   const continueExec = useCallback(() => {
     if (!sabRef.current) return;
+    syncSharedBreakpoints(enabledBreakpointLines);
     workerRef.current?.postMessage({
       type: "UPDATE_BREAKPOINTS",
       payload: enabledBreakpointLines,
@@ -298,11 +327,12 @@ export function usePyodideWorkerRuntime(args: {
     Atomics.store(sabRef.current, IDX_CMD, CMD_RUN);
     Atomics.notify(sabRef.current, IDX_CMD);
     setIsPaused(false);
-  }, [enabledBreakpointLines, setIsPaused]);
+  }, [enabledBreakpointLines, setIsPaused, syncSharedBreakpoints]);
 
   const stepOver = useCallback(
     (baseDepth: number) => {
       if (!sabRef.current) return;
+      syncSharedBreakpoints(enabledBreakpointLines);
       workerRef.current?.postMessage({
         type: "UPDATE_BREAKPOINTS",
         payload: enabledBreakpointLines,
@@ -312,12 +342,13 @@ export function usePyodideWorkerRuntime(args: {
       Atomics.notify(sabRef.current, IDX_CMD);
       setIsPaused(false);
     },
-    [enabledBreakpointLines, setIsPaused],
+    [enabledBreakpointLines, setIsPaused, syncSharedBreakpoints],
   );
 
   const stepInto = useCallback(
     (baseDepth: number) => {
       if (!sabRef.current) return;
+      syncSharedBreakpoints(enabledBreakpointLines);
       workerRef.current?.postMessage({
         type: "UPDATE_BREAKPOINTS",
         payload: enabledBreakpointLines,
@@ -327,12 +358,13 @@ export function usePyodideWorkerRuntime(args: {
       Atomics.notify(sabRef.current, IDX_CMD);
       setIsPaused(false);
     },
-    [enabledBreakpointLines, setIsPaused],
+    [enabledBreakpointLines, setIsPaused, syncSharedBreakpoints],
   );
 
   const stepOut = useCallback(
     (baseDepth: number) => {
       if (!sabRef.current) return;
+      syncSharedBreakpoints(enabledBreakpointLines);
       workerRef.current?.postMessage({
         type: "UPDATE_BREAKPOINTS",
         payload: enabledBreakpointLines,
@@ -342,7 +374,7 @@ export function usePyodideWorkerRuntime(args: {
       Atomics.notify(sabRef.current, IDX_CMD);
       setIsPaused(false);
     },
-    [enabledBreakpointLines, setIsPaused],
+    [enabledBreakpointLines, setIsPaused, syncSharedBreakpoints],
   );
 
   const stopExec = useCallback(() => {
