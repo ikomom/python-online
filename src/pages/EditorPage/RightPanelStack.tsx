@@ -163,6 +163,7 @@ function PanelDivider(props: DividerProps & { isEnabled: boolean }) {
       aria-valuemin={props.minSize}
       aria-valuemax={props.maxSize}
       tabIndex={isEnabled ? 0 : -1}
+      onPointerDown={isEnabled ? props.onPointerDown : undefined}
       onMouseDown={isEnabled ? props.onMouseDown : undefined}
       onTouchStart={isEnabled ? props.onTouchStart : undefined}
       onTouchEnd={isEnabled ? props.onTouchEnd : undefined}
